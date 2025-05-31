@@ -4,6 +4,13 @@
   <meta charset="UTF-8" />
   <title>Studio Control Interface</title>
   <link rel="stylesheet" href="style.css" />
+  <style>
+    .ppm-meter {
+      background: #333;
+      border: 1px solid #555;
+      margin-bottom: 10px;
+    }
+  </style>
 </head>
 <body>
   <header>
@@ -11,6 +18,12 @@
   </header>
 
   <div class="container">
+    <!-- Section: Studio Mic Level (PPM) -->
+    <div class="section" id="studio-meter-section">
+      <h2>Studio Mic Level (PPM)</h2>
+      <canvas id="studio-meter" class="ppm-meter" width="300" height="50"></canvas>
+    </div>
+
     <!-- Section: Waiting & Connected Contributors -->
     <div class="section" id="contributors-section">
       <h2>Waiting Contributors</h2>

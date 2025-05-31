@@ -1,10 +1,10 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface (v8).
- * - Defers draining ICE candidates until after remote description is set.
- * - In ontrack, ensures UI exists by creating it if necessary.
- * - Maintains two-way audio, mutual mute, and handles ICE queuing.
+ * Front-end logic for the studio control interface (v8+PPM).
+ * - Adds a Studio Mic PPM meter.
+ * - Converts remote meters to PPM-style with peak hold.
+ * - Maintains two-way audio, mutual mute, ICE queuing, and PPM.
  */
 
 (() => {
@@ -20,18 +20,18 @@
   };
 
   let ws;
-  // peers: remoteID → {
+  // peers: remoteID -> {
   //   state,
   //   liWaiting,
   //   liConnected,
   //   pc,
-  //   pendingCandidates,          // queue ICE before PC created
+  //   pendingCandidates,
   //   audioElementRemoteToStudio,
   //   audioElementStudioToRemote,
   //   meterCanvas,
   //   analyserL,
   //   analyserR,
-  //   meterContext,
+  //   ppmPeak,
   //   statusSpan,
   //   muteBtn,
   //   kickBtn,
@@ -46,13 +46,24 @@
   const chatInputEl = document.getElementById('chatInput');
   const sendChatBtn = document.getElementById('sendChatBtn');
 
-  // Studio's microphone stream (one MediaStream for all peers)
+  // Studio mic PPM meter elements
+  const studioMeterCanvas = document.getElementById('studio-meter');
+  const studioMeterCtx = studioMeterCanvas.getContext('2d');
   let studioAudioStream = null;
+  let studioAnalyser = null;
+  let studioPPMPeak = 0;
+
+  // Studio's microphone track for two-way audio
   let studioAudioTrack = null;
 
   /////////////////////////////////////////////////////
-  // Initialize WebSocket
+  // Initialize WebSocket and Studio mic meter
   /////////////////////////////////////////////////////
+  async function init() {
+    initStudioMicPPM();
+    initWebSocket();
+  }
+
   function initWebSocket() {
     ws = new WebSocket(`wss://${window.location.host}`);
     ws.onopen = () => {
@@ -120,7 +131,7 @@
         break;
 
       case 'kicked':
-        alert(`You have been disconnected by the studio:\n\n${msg.reason}`);
+        alert(`You have been disconnected by the studio:\\n\\n${msg.reason}`);
         ws.close();
         break;
 
@@ -134,13 +145,76 @@
   }
 
   /////////////////////////////////////////////////////
+  // Studio mic PPM initialization
+  /////////////////////////////////////////////////////
+  async function initStudioMicPPM() {
+    try {
+      // Grab the studio mic for monitoring and for two-way audio
+      studioAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      console.error('Studio mic access error:', err);
+      return;
+    }
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(studioAudioStream);
+
+    studioAnalyser = audioCtx.createAnalyser();
+    studioAnalyser.fftSize = 1024; // time-domain size
+    source.connect(studioAnalyser);
+
+    // Keep the microphone track for adding to each peer
+    studioAudioTrack = studioAudioStream.getAudioTracks()[0];
+
+    // Start drawing the PPM meter
+    drawStudioPPM();
+  }
+
+  function drawStudioPPM() {
+    const bufferLength = studioAnalyser.fftSize;
+    const dataArray = new Float32Array(bufferLength);
+    studioAnalyser.getFloatTimeDomainData(dataArray);
+
+    // Compute peak absolute sample
+    let maxAmp = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const absVal = Math.abs(dataArray[i]);
+      if (absVal > maxAmp) maxAmp = absVal;
+    }
+
+    // Peak hold with decay
+    if (maxAmp > studioPPMPeak) {
+      studioPPMPeak = maxAmp;
+    } else {
+      studioPPMPeak = Math.max(studioPPMPeak - 0.005, 0);
+    }
+
+    // Clear canvas
+    const width = studioMeterCanvas.width;
+    const height = studioMeterCanvas.height;
+    studioMeterCtx.clearRect(0, 0, width, height);
+
+    // Draw current level (green)
+    const levelWidth = maxAmp * width;
+    studioMeterCtx.fillStyle = '#4caf50';
+    studioMeterCtx.fillRect(0, 0, levelWidth, height);
+
+    // Draw peak hold line (red)
+    const peakX = studioPPMPeak * width;
+    studioMeterCtx.fillStyle = '#f44336';
+    studioMeterCtx.fillRect(peakX - 1, 0, 2, height);
+
+    requestAnimationFrame(drawStudioPPM);
+  }
+
+  /////////////////////////////////////////////////////
   // Add a remote to the UI (waiting or connected)
   /////////////////////////////////////////////////////
   function addRemoteToUI(remoteID, remoteName, state) {
     if (peers.has(remoteID)) return;
 
-    const entry = { state, pendingCandidates: [] };
+    const entry = { state, pendingCandidates: [], ppmPeak: 0 };
 
+    // Build waiting UI
     const liWait = document.createElement('li');
     liWait.id = `waiting-${remoteID}`;
     liWait.className = 'contributor-item';
@@ -220,13 +294,13 @@
   }
 
   /////////////////////////////////////////////////////
-  // Create Connected Contributors UI (with Mute & Kick)
+  // Create Connected Contributors UI (with PPM meter)
   /////////////////////////////////////////////////////
   function addConnectedUI(remoteID) {
     const entry = peers.get(remoteID);
     if (!entry) return;
 
-    // If UI already exists, skip
+    // Avoid duplicate UI
     if (entry.liConnected) return;
 
     const remoteName = entry.liWaiting
@@ -292,11 +366,11 @@
     liConn.appendChild(kickBtn);
     entry.kickBtn = kickBtn;
 
-    // Audio meter canvas
+    // PPM meter canvas
     const meterCanvas = document.createElement('canvas');
-    meterCanvas.width = 100;
-    meterCanvas.height = 20;
-    meterCanvas.className = 'meter-canvas';
+    meterCanvas.width = 300;
+    meterCanvas.height = 50;
+    meterCanvas.className = 'ppm-meter';
     meterCanvas.id = `meter-${remoteID}`;
     liConn.appendChild(meterCanvas);
     entry.meterCanvas = meterCanvas;
@@ -305,7 +379,7 @@
     contributorListEl.appendChild(liConn);
     entry.liConnected = liConn;
 
-    // Hidden <audio> element for remote → studio audio
+    // Hidden <audio> for remote→studio
     const audioRemote = document.createElement('audio');
     audioRemote.id = `audio-remote-${remoteID}`;
     audioRemote.autoplay = true;
@@ -314,7 +388,7 @@
     document.body.appendChild(audioRemote);
     entry.audioElementRemoteToStudio = audioRemote;
 
-    // Hidden <audio> element for studio → remote audio
+    // Hidden <audio> for studio→remote
     const audioStudio = document.createElement('audio');
     audioStudio.id = `audio-studio-${remoteID}`;
     audioStudio.autoplay = true;
@@ -323,10 +397,11 @@
     document.body.appendChild(audioStudio);
     entry.audioElementStudioToRemote = audioStudio;
 
+    // Initialize analysers after track arrives
     entry.analyserL = null;
     entry.analyserR = null;
+    entry.ppmPeak = 0;
 
-    // Enable the Mute button now
     entry.muteBtn.disabled = false;
   }
 
@@ -370,15 +445,9 @@
       return;
     }
 
-    // Ensure studio microphone is available
-    if (!studioAudioStream) {
-      try {
-        studioAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        studioAudioTrack = studioAudioStream.getAudioTracks()[0];
-      } catch (err) {
-        console.error('Studio getUserMedia error:', err);
-        return;
-      }
+    // Ensure studio mic track is ready
+    if (!studioAudioTrack && studioAudioStream) {
+      studioAudioTrack = studioAudioStream.getAudioTracks()[0];
     }
 
     // Create RTCPeerConnection if needed
@@ -386,12 +455,15 @@
       const pc = new RTCPeerConnection(ICE_CONFIG);
       entry.pc = pc;
 
-      // Add studio → remote track
+      // Add studio→remote track
       if (studioAudioTrack) {
-        pc.addTrack(studioAudioTrack, studioAudioStream);
+        pc.addTrack(
+          studioAudioTrack,
+          studioAudioStream || new MediaStream([studioAudioTrack])
+        );
       }
 
-      // Parse Opus info from offer
+      // Parse Opus info from SDP offer
       const codecInfo = parseOpusInfo(sdp);
       if (codecInfo) {
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
@@ -400,16 +472,16 @@
       // Single ontrack handler
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
-        // If UI not created yet, create it now
+        // Ensure UI exists
         if (!entry.audioElementRemoteToStudio) {
           addConnectedUI(remoteID);
         }
-        // Attach remote→studio audio if not yet attached
+        // First track is remote→studio
         if (!entry.audioElementRemoteToStudio.srcObject) {
           entry.audioElementRemoteToStudio.srcObject = incomingStream;
-          setupMeter(remoteID, incomingStream);
+          setupRemotePPM(remoteID, incomingStream);
         }
-        // (Optional) If studio→remote audio arrives back, attach to audioElementStudioToRemote
+        // If another track arrives (e.g. studio→remote echo), attach if needed
         else if (
           !entry.audioElementStudioToRemote.srcObject &&
           evt.track.kind === 'audio'
@@ -418,7 +490,6 @@
         }
       };
 
-      // Handle ICE candidates from remote
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
@@ -438,22 +509,22 @@
       };
     }
 
-    // Set remote description (offer)
+    // Set remote description
     try {
-      await entry.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      await entry.pc.setRemoteDescription(
+        new RTCSessionDescription({ type: 'offer', sdp })
+      );
     } catch (err) {
       console.error(`Failed to set remote description for ${remoteID}:`, err);
       return;
     }
 
-    // Drain queued ICE candidates now that remote description is set
+    // Drain queued ICE candidates now that remoteDescription is set
     if (entry.pendingCandidates.length > 0) {
       entry.pendingCandidates.forEach((c) => {
         entry.pc
           .addIceCandidate(new RTCIceCandidate(c))
-          .catch((e) => {
-            console.error('Error adding queued ICE candidate:', e);
-          });
+          .catch((e) => console.error('Error adding queued ICE candidate:', e));
       });
       entry.pendingCandidates = [];
     }
@@ -464,7 +535,10 @@
       answer = await entry.pc.createAnswer();
       await entry.pc.setLocalDescription(answer);
     } catch (err) {
-      console.error(`Failed to create/set local answer for ${remoteID}:`, err);
+      console.error(
+        `Failed to create/set local answer for ${remoteID}:`,
+        err
+      );
       return;
     }
 
@@ -484,10 +558,8 @@
   function handleCandidate(from, candidate) {
     const entry = peers.get(from);
     if (!entry) {
-      // Silently ignore if no peer exists at all
       return;
     }
-    // If PC not created or remote description not set, queue candidate
     if (!entry.pc || !entry.pc.remoteDescription) {
       entry.pendingCandidates.push(candidate);
       return;
@@ -518,7 +590,7 @@
   // Parse Opus codec info from SDP
   /////////////////////////////////////////////////////
   function parseOpusInfo(sdp) {
-    const lines = sdp.split('\n');
+    const lines = sdp.split('\\n');
     let opusPayloadType = null;
     const fmtMap = new Map();
     let sampling = null,
@@ -526,7 +598,6 @@
 
     for (const line of lines) {
       if (line.startsWith('a=rtpmap:') && line.includes('opus/48000')) {
-        // e.g. a=rtpmap:111 opus/48000/2
         const parts = line.trim().split(' ');
         const payload = parts[0].split(':')[1];
         const params = parts[1].split('/');
@@ -545,72 +616,82 @@
   }
 
   /////////////////////////////////////////////////////
-  // Set up stereo audio meter for remote → studio
+  // Set up PPM for a remote → studio stream
   /////////////////////////////////////////////////////
-  function setupMeter(remoteID, stream) {
+  function setupRemotePPM(remoteID, stream) {
     const entry = peers.get(remoteID);
     if (!entry) return;
 
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
 
+    // Extract two channels for stereo
     const splitter = audioCtx.createChannelSplitter(2);
     src.connect(splitter);
 
     const analyserL = audioCtx.createAnalyser();
-    analyserL.fftSize = 256;
+    analyserL.fftSize = 1024;
     const analyserR = audioCtx.createAnalyser();
-    analyserR.fftSize = 256;
+    analyserR.fftSize = 1024;
 
     splitter.connect(analyserL, 0);
     splitter.connect(analyserR, 1);
 
     entry.analyserL = analyserL;
     entry.analyserR = analyserR;
-    entry.meterContext = entry.meterCanvas.getContext('2d');
+    entry.ppmPeak = 0;
 
-    drawMeter(remoteID);
+    drawRemotePPM(remoteID);
   }
 
   /////////////////////////////////////////////////////
-  // Draw audio meter
+  // Draw PPM meter for remote
   /////////////////////////////////////////////////////
-  function drawMeter(remoteID) {
+  function drawRemotePPM(remoteID) {
     const entry = peers.get(remoteID);
     if (!entry || !entry.analyserL || !entry.analyserR) return;
 
-    const { analyserL, analyserR, meterCanvas, meterContext } = entry;
-    const bufferLength = analyserL.frequencyBinCount;
-    const dataArrayL = new Uint8Array(bufferLength);
-    const dataArrayR = new Uint8Array(bufferLength);
+    const canvas = entry.meterCanvas;
+    const ctx = entry.meterContext;
+    const width = canvas.width;
+    const height = canvas.height;
 
-    function draw() {
-      analyserL.getByteFrequencyData(dataArrayL);
-      analyserR.getByteFrequencyData(dataArrayR);
+    const bufferLength = entry.analyserL.fftSize;
+    const dataL = new Float32Array(bufferLength);
+    const dataR = new Float32Array(bufferLength);
+    entry.analyserL.getFloatTimeDomainData(dataL);
+    entry.analyserR.getFloatTimeDomainData(dataR);
 
-      let sumL = 0,
-        sumR = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        sumL += dataArrayL[i] * dataArrayL[i];
-        sumR += dataArrayR[i] * dataArrayR[i];
-      }
-      const rmsL = Math.sqrt(sumL / bufferLength) / 255;
-      const rmsR = Math.sqrt(sumR / bufferLength) / 255;
-
-      meterContext.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
-
-      meterContext.fillStyle = '#4caf50';
-      const widthL = Math.round(rmsL * meterCanvas.width);
-      meterContext.fillRect(0, 0, widthL, meterCanvas.height / 2 - 1);
-
-      meterContext.fillStyle = '#2196f3';
-      const widthR = Math.round(rmsR * meterCanvas.width);
-      meterContext.fillRect(0, meterCanvas.height / 2 + 1, widthR, meterCanvas.height / 2 - 1);
-
-      requestAnimationFrame(draw);
+    // Find max absolute amplitude across both channels
+    let maxAmp = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const aL = Math.abs(dataL[i]);
+      const aR = Math.abs(dataR[i]);
+      if (aL > maxAmp) maxAmp = aL;
+      if (aR > maxAmp) maxAmp = aR;
     }
 
-    draw();
+    // Peak hold with decay
+    if (maxAmp > entry.ppmPeak) {
+      entry.ppmPeak = maxAmp;
+    } else {
+      entry.ppmPeak = Math.max(entry.ppmPeak - 0.005, 0);
+    }
+
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Draw current level (green)
+    const levelWidth = maxAmp * width;
+    ctx.fillStyle = '#4caf50';
+    ctx.fillRect(0, 0, levelWidth, height);
+
+    // Draw peak hold line (red)
+    const peakX = entry.ppmPeak * width;
+    ctx.fillStyle = '#f44336';
+    ctx.fillRect(peakX - 1, 0, 2, height);
+
+    requestAnimationFrame(() => drawRemotePPM(remoteID));
   }
 
   /////////////////////////////////////////////////////
@@ -628,25 +709,10 @@
     chatWindowEl.scrollTop = chatWindowEl.scrollHeight;
   }
 
-  sendChatBtn.onclick = () => {
-    const text = chatInputEl.value.trim();
-    if (!text) return;
-    const msgObj = {
-      type: 'chat',
-      from: 'studio',
-      name: 'Studio',
-      message: text,
-      target: 'all',
-    };
-    ws.send(JSON.stringify(msgObj));
-    appendChatMessage('Studio', text, true);
-    chatInputEl.value = '';
-  };
-
   /////////////////////////////////////////////////////
-  // Initialization
+  // Initialization on page load
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
-    initWebSocket();
+    init();
   });
 })();
