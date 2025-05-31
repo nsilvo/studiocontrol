@@ -5,11 +5,9 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Remote Contributor</title>
-  <!-- Link to your CSS file (if any) -->
   <link rel="stylesheet" href="style.css" />
-
   <style>
-    /* Minimal inline styling for layout; you can override/extend in style.css */
+    /* Simple styling; extend/override in style.css as needed */
     body {
       font-family: Arial, sans-serif;
       margin: 20px;
@@ -19,15 +17,40 @@
     h1 {
       margin-bottom: 10px;
     }
-    #name-container {
-      margin-bottom: 15px;
+    .hidden {
+      display: none;
     }
-    #nameInput {
-      width: 300px;
+    #name-step {
+      max-width: 400px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      text-align: center;
+    }
+    #name-step input {
+      width: 80%;
       padding: 8px;
+      margin-bottom: 10px;
       border: 1px solid #ccc;
       border-radius: 4px;
       font-size: 14px;
+    }
+    #name-step button {
+      padding: 8px 16px;
+      background: #0066cc;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #name-step button:hover {
+      background: #005bb5;
+    }
+    #main-ui {
+      max-width: 800px;
+      margin: 0 auto;
     }
     #controls {
       margin-bottom: 15px;
@@ -84,38 +107,50 @@
       font-weight: bold;
       color: #0066cc;
     }
+    /* Name display area */
+    #display-name {
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
   </style>
 </head>
 <body>
-  <h1>Remote Contributor</h1>
-
-  <div id="name-container">
-    <label for="nameInput">Your Name:</label>
+  <!-- Step 1: Enter name -->
+  <div id="name-step">
+    <h1>Welcome, Contributor</h1>
+    <p>Please enter your name to continue:</p>
     <input id="nameInput" type="text" placeholder="Enter your name" />
+    <br />
+    <button id="nameSubmitBtn">Continue</button>
   </div>
 
-  <div>
-    Connection status: <span id="connStatus">not connected</span>
-  </div>
+  <!-- Step 2: Main UI (hidden until name submitted) -->
+  <div id="main-ui" class="hidden">
+    <h1>Remote Contributor Interface</h1>
+    <div id="display-name"></div>
+    <div>
+      Connection status: <span id="connStatus">not connected</span>
+    </div>
 
-  <div id="controls">
-    <button id="muteSelfBtn">Mute Myself</button>
-    <button id="toneBtn">Send GLITS Tone</button>
-    <button id="listenStudioBtn">Listen to Studio</button>
-  </div>
+    <div id="controls">
+      <button id="muteSelfBtn">Mute Myself</button>
+      <button id="toneBtn">Send GLITS Tone</button>
+      <button id="listenStudioBtn">Listen to Studio</button>
+    </div>
 
-  <div id="meter-container">
-    <canvas id="meter-canvas" width="300" height="50"></canvas>
-  </div>
+    <div id="meter-container">
+      <canvas id="meter-canvas" width="300" height="50"></canvas>
+    </div>
 
-  <div id="chat-container">
-    <div id="chatWindow"></div>
-    <input id="chatInput" type="text" placeholder="Type a message..." />
-    <button id="sendChatBtn">Send</button>
-  </div>
+    <div id="chat-container">
+      <div id="chatWindow"></div>
+      <input id="chatInput" type="text" placeholder="Type a message..." />
+      <button id="sendChatBtn">Send</button>
+    </div>
 
-  <!-- Hidden audio element for incoming studio audio -->
-  <audio id="audio-studio" autoplay style="display: none;"></audio>
+    <!-- Hidden audio element for incoming studio audio -->
+    <audio id="audio-studio" autoplay style="display: none;"></audio>
+  </div>
 
   <!-- Include the remote JavaScript -->
   <script src="remote.js"></script>

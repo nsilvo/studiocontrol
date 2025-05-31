@@ -1,11 +1,20 @@
 /**
- * remote.js (v4.1)
+ * remote.js (v5)
  *
- * Revised so that:
- *  1. We read “Your Name” from the input (#nameInput) at page load,
- *     before sending { type:'join', role:'remote', name: displayName }.
- *  2. If the input is blank, it falls back to "Remote".
- *  3. All other behavior remains the same.
+ * Two‐step remote flow:
+ *  1. Prompt for name (Step 1).
+ *  2. Once name is entered, reveal main UI, show displayName, and start WebSocket/RTC.
+ *
+ * Features:
+ *  • Send name in join message.
+ *  • WebRTC audio (Opus 48kHz stereo) via TURN/STUN.
+ *  • GLITS tone toggle.
+ *  • Mute/unmute self on studio request.
+ *  • Listen to studio audio toggle.
+ *  • Local PPM meter.
+ *  • Dynamic bitrate updates from studio.
+ *  • Chat to studio.
+ *  • Auto‐reconnect on WS close.
  */
 
 (() => {
@@ -25,7 +34,7 @@
   let localStream = null;
   let audioSender = null;
   let localID = null;
-  let displayName = 'Remote'; // default until overridden by input
+  let displayName = ''; // Will be set from name input
   let isMuted = false;
   let isTone = false;
   let toneOscillator = null;
@@ -33,8 +42,13 @@
   let toneDestination = null;
   let toneTimer = null;
 
-  // UI elements (populated after load)
+  // DOM elements (after Step 1)
   let nameInput;
+  let nameSubmitBtn;
+  let nameStepDiv;
+  let mainUiDiv;
+  let displayNameDiv;
+
   let statusSpan;
   let muteBtn;
   let toneBtn;
@@ -51,13 +65,57 @@
   let analyserR = null;
 
   /////////////////////////////////////////////////////
+  // Step 1: Bind name‐submission logic
+  /////////////////////////////////////////////////////
+  function initNameStep() {
+    nameInput = document.getElementById('nameInput');
+    nameSubmitBtn = document.getElementById('nameSubmitBtn');
+    nameStepDiv = document.getElementById('name-step');
+    mainUiDiv = document.getElementById('main-ui');
+    displayNameDiv = document.getElementById('display-name');
+
+    nameSubmitBtn.onclick = () => {
+      const typed = nameInput.value.trim();
+      if (typed === '') {
+        alert('Please enter a name before continuing.');
+        return;
+      }
+      displayName = typed;
+      // Hide name step, reveal main UI
+      nameStepDiv.classList.add('hidden');
+      mainUiDiv.classList.remove('hidden');
+      displayNameDiv.textContent = `Name: ${displayName}`;
+      // Now initialize the rest of the UI/sockets
+      initMainUI();
+      initWebSocket();
+    };
+  }
+
+  /////////////////////////////////////////////////////
+  // Initialize main UI elements & event listeners
+  /////////////////////////////////////////////////////
+  function initMainUI() {
+    statusSpan = document.getElementById('connStatus');
+    muteBtn = document.getElementById('muteSelfBtn');
+    toneBtn = document.getElementById('toneBtn');
+    listenStudioBtn = document.getElementById('listenStudioBtn');
+    meterCanvas = document.getElementById('meter-canvas');
+    meterContext = meterCanvas.getContext('2d');
+    chatWindowEl = document.getElementById('chatWindow');
+    chatInputEl = document.getElementById('chatInput');
+    sendChatBtn = document.getElementById('sendChatBtn');
+    audioStudioElem = document.getElementById('audio-studio');
+
+    muteBtn.onclick = toggleMute;
+    toneBtn.onclick = toggleTone;
+    listenStudioBtn.onclick = toggleListenStudio;
+    sendChatBtn.onclick = sendChat;
+  }
+
+  /////////////////////////////////////////////////////
   // Initialize WebSocket & event listeners
   /////////////////////////////////////////////////////
   function initWebSocket() {
-    // Read the displayName from the nameInput field:
-    const typedName = nameInput.value.trim();
-    displayName = typedName === '' ? 'Remote' : typedName;
-
     ws = new WebSocket(`wss://${window.location.host}`);
     ws.onopen = () => {
       console.log('WebSocket connected (remote).');
@@ -458,29 +516,36 @@
   }
 
   /////////////////////////////////////////////////////
-  // DOCUMENT READY
+  // DOCUMENT READY (initial)
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
-    // Now that DOM is loaded, we can getElementById safely:
-    nameInput = document.getElementById('nameInput');
-    statusSpan = document.getElementById('connStatus');
-    muteBtn = document.getElementById('muteSelfBtn');
-    toneBtn = document.getElementById('toneBtn');
-    listenStudioBtn = document.getElementById('listenStudioBtn');
-    meterCanvas = document.getElementById('meter-canvas');
-    meterContext = meterCanvas.getContext('2d');
-    chatWindowEl = document.getElementById('chatWindow');
-    chatInputEl = document.getElementById('chatInput');
-    sendChatBtn = document.getElementById('sendChatBtn');
-    audioStudioElem = document.getElementById('audio-studio');
-
-    // Hook up event listeners now that elements exist:
-    muteBtn.onclick = toggleMute;
-    toneBtn.onclick = toggleTone;
-    listenStudioBtn.onclick = toggleListenStudio;
-    sendChatBtn.onclick = sendChat;
-
-    // Initialize WebSocket & signaling
-    initWebSocket();
+    initNameStep();
   });
+
+  /////////////////////////////////////////////////////
+  // Initialize the Name step
+  /////////////////////////////////////////////////////
+  function initNameStep() {
+    nameInput = document.getElementById('nameInput');
+    nameSubmitBtn = document.getElementById('nameSubmitBtn');
+    nameStepDiv = document.getElementById('name-step');
+    mainUiDiv = document.getElementById('main-ui');
+    displayNameDiv = document.getElementById('display-name');
+
+    nameSubmitBtn.onclick = () => {
+      const typed = nameInput.value.trim();
+      if (typed === '') {
+        alert('Please enter a name before continuing.');
+        return;
+      }
+      displayName = typed;
+      // Hide name step, reveal main UI
+      nameStepDiv.classList.add('hidden');
+      mainUiDiv.classList.remove('hidden');
+      displayNameDiv.textContent = `Name: ${displayName}`;
+      // Now initialize the rest of the UI and start WS/RTC
+      initMainUI();
+      initWebSocket();
+    };
+  }
 })();
