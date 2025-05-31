@@ -1,17 +1,14 @@
 /**
  * remote.js
  *
- * Front-end logic for a remote contributor.
- * - Connects to signaling server via WebSocket.
- * - Captures microphone (48 kHz stereo) and establishes WebRTC peer to the studio.
- * - Allows toggling mute/self and sending a 1 kHz test tone.
- * - Displays own audio meter (stereo).
- * - Handles chat ⇆ studio.
- * - Auto-reconnects on WebSocket loss.
+ * Front-end logic for a remote contributor (v2).
+ * - After joining, waits in “waiting” state until server sends “start-call.”
+ * - Then performs WebRTC: getUserMedia, create offer, etc.
+ * - Supports mute/self, send test tone, audio meter, chat.
  */
 
 (() => {
-  // ICE servers configuration (same as studio)
+  // ICE servers configuration
   const ICE_CONFIG = {
     iceServers: [
       {
@@ -60,7 +57,6 @@
 
     ws.onopen = () => {
       console.log('WebSocket connected (remote).');
-      // Send join
       ws.send(JSON.stringify({ type: 'join', role: 'remote', name: displayName }));
     };
 
@@ -77,7 +73,6 @@
       console.warn('WebSocket closed. Reconnecting in 5 seconds...');
       connStatusSpan.textContent = 'disconnected';
       setTimeout(initWebSocket, 5000);
-      // Clean up existing peer so we can reinit later
       if (pc) {
         pc.close();
         pc = null;
@@ -91,7 +86,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Handle signaling messages from server
+  // Handle incoming signaling messages
   /////////////////////////////////////////////////////
   async function handleSignalingMessage(msg) {
     switch (msg.type) {
@@ -99,7 +94,12 @@
         // { type:'id-assigned', id }
         localID = msg.id;
         console.log('Assigned localID:', localID);
-        // Now that we have an ID, set up WebRTC
+        connStatusSpan.textContent = 'waiting';
+        break;
+
+      case 'start-call':
+        // Studio approved connection → start WebRTC
+        connStatusSpan.textContent = 'connecting...';
         await startWebRTC();
         break;
 
@@ -109,14 +109,12 @@
         break;
 
       case 'candidate':
-        // { type:'candidate', from:'studio'|'somebody', candidate }
+        // { type:'candidate', from:'studio', candidate }
         await handleCandidate(msg.candidate);
         break;
 
-      case 'remote-disconnected':
       case 'studio-disconnected':
-        // If studio disconnected, we can display status and try to reinit if needed
-        console.warn('Studio disconnected. Will retry connection on next WebSocket reopen.');
+        console.warn('Studio disconnected.');
         connStatusSpan.textContent = 'studio disconnected';
         break;
 
@@ -131,12 +129,10 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start WebRTC: get microphone, create peer, send offer
+  // Start WebRTC handshake (getUserMedia → createOffer → send to studio)
   /////////////////////////////////////////////////////
   async function startWebRTC() {
-    connStatusSpan.textContent = 'initializing...';
-
-    // 1. Acquire microphone (48 kHz stereo if possible)
+    // Acquire microphone (48 kHz stereo)
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -150,17 +146,17 @@
       return;
     }
 
-    // 2. Create RTCPeerConnection
+    // Create RTCPeerConnection
     pc = new RTCPeerConnection(ICE_CONFIG);
 
-    // Add audio tracks to PC; keep reference to sender for replaceTrack
+    // Add audio track & keep sender reference
     const track = localStream.getAudioTracks()[0];
     audioSender = pc.addTrack(track, localStream);
 
-    // 3. Set up local audio meter
+    // Set up local audio meter (mic)
     setupLocalMeter(localStream);
 
-    // 4. PC event handlers
+    // ICE candidates → send to studio
     pc.onicecandidate = evt => {
       if (evt.candidate) {
         ws.send(
@@ -174,23 +170,24 @@
       }
     };
 
+    // Connection state updates
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       connStatusSpan.textContent = state;
       console.log('Connection state:', state);
     };
 
-    // 5. Create offer & setLocalDescription
+    // Create offer, set local description
     let offer;
     try {
       offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
     } catch (err) {
-      console.error('Failed to create/send offer:', err);
+      console.error('Failed to create/set offer:', err);
       return;
     }
 
-    // 6. Send offer to studio
+    // Send offer to studio
     ws.send(
       JSON.stringify({
         type: 'offer',
@@ -201,13 +198,10 @@
   }
 
   /////////////////////////////////////////////////////
-  // Handle incoming answer from studio
+  // Handle answer from studio
   /////////////////////////////////////////////////////
   async function handleAnswer(sdp) {
-    if (!pc) {
-      console.error('No PC when receiving answer');
-      return;
-    }
+    if (!pc) return;
     try {
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
       console.log('Remote description (answer) set');
@@ -217,13 +211,10 @@
   }
 
   /////////////////////////////////////////////////////
-  // Handle incoming ICE candidate from studio
+  // Handle ICE candidate from studio
   /////////////////////////////////////////////////////
   async function handleCandidate(candidate) {
-    if (!pc) {
-      console.error('No PC when receiving candidate');
-      return;
-    }
+    if (!pc) return;
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
@@ -238,7 +229,6 @@
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
     const source = audioContext.createMediaStreamSource(stream);
 
-    // Split channels
     const splitter = audioContext.createChannelSplitter(2);
     source.connect(splitter);
 
@@ -254,7 +244,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Continuously draw local audio meter
+  // Draw local audio meter (green = left, blue = right)
   /////////////////////////////////////////////////////
   function drawLocalMeter() {
     if (!analyserL || !analyserR) return;
@@ -267,7 +257,6 @@
       analyserL.getByteFrequencyData(dataArrayL);
       analyserR.getByteFrequencyData(dataArrayR);
 
-      // Compute approximate RMS
       let sumL = 0,
         sumR = 0;
       for (let i = 0; i < bufferLength; i++) {
@@ -277,15 +266,12 @@
       const rmsL = Math.sqrt(sumL / bufferLength) / 255;
       const rmsR = Math.sqrt(sumR / bufferLength) / 255;
 
-      // Draw on canvas
       meterContext.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
 
-      // Left (green)
       meterContext.fillStyle = '#4caf50';
       const widthL = Math.round(rmsL * meterCanvas.width);
       meterContext.fillRect(0, 0, widthL, meterCanvas.height / 2 - 1);
 
-      // Right (blue)
       meterContext.fillStyle = '#2196f3';
       const widthR = Math.round(rmsR * meterCanvas.width);
       meterContext.fillRect(0, meterCanvas.height / 2 + 1, widthR, meterCanvas.height / 2 - 1);
@@ -309,19 +295,17 @@
       analyserL.disconnect();
       analyserR.disconnect();
     } else {
-      // Reconnect meter
       setupLocalMeter(localStream);
     }
   }
 
   /////////////////////////////////////////////////////
-  // Toggle sending 1 kHz test tone
+  // Toggle sending a 1 kHz test tone
   /////////////////////////////////////////////////////
   function toggleTone() {
     if (!audioSender) return;
 
     if (!isTone) {
-      // Create new AudioContext & oscillator
       toneContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       toneOscillator = toneContext.createOscillator();
       toneOscillator.type = 'sine';
@@ -331,18 +315,15 @@
       toneOscillator.connect(toneDestination);
       toneOscillator.start();
 
-      // Replace track with tone track
       const toneTrack = toneDestination.stream.getAudioTracks()[0];
       audioSender.replaceTrack(toneTrack);
 
-      // Re‐setup meter on tone stream
       setupLocalMeter(toneDestination.stream);
 
       isTone = true;
       toneBtn.textContent = 'Stop Tone';
       console.log('Switched to tone');
     } else {
-      // Revert to microphone track
       toneOscillator.stop();
       toneOscillator.disconnect();
       toneDestination.disconnect();
@@ -350,7 +331,6 @@
       const micTrack = localStream.getAudioTracks()[0];
       audioSender.replaceTrack(micTrack);
 
-      // Re‐setup meter on mic stream
       setupLocalMeter(localStream);
 
       isTone = false;
@@ -360,7 +340,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Chat logic (remote)
+  // Append chat message to chat window
   /////////////////////////////////////////////////////
   function appendChatMessage(senderName, message, isLocal) {
     const div = document.createElement('div');
@@ -377,7 +357,6 @@
   sendChatBtn.onclick = () => {
     const text = chatInputEl.value.trim();
     if (!text) return;
-    // Send to studio
     const msgObj = {
       type: 'chat',
       from: localID,

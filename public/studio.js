@@ -1,15 +1,16 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface.
- * - Connects to the signaling server via WebSocket.
- * - Manages a separate RTCPeerConnection per remote contributor.
- * - Displays contributor list, mute/unmute, audio meters, connection status, and codec info.
- * - Handles studio↔remote chat.
+ * Front-end logic for the studio control interface (v2).
+ * - Remotes now wait in "waiting" state until the studio clicks "Connect."
+ * - Two lists: Waiting Contributors & Connected Contributors.
+ * - On "Connect", server tells remote to send its offer.
+ * - Studio answers offers when they arrive.
+ * - Displays audio meters, mute/unmute, and chat.
  */
 
 (() => {
-  // ICE servers configuration
+  // ICE servers configuration (TURN/STUN)
   const ICE_CONFIG = {
     iceServers: [
       {
@@ -22,20 +23,23 @@
 
   // Globals
   let ws;
-  const peers = new Map(); // remoteID -> { pc, audioElement, meterCanvas, analyserL, analyserR, meterContext }
+  // peers: remoteID → { state, liWaiting, liConnected, pc, audioElement, meterCanvas, analyserL, analyserR, meterContext, statusSpan, muteBtn, connectBtn }
+  const peers = new Map();
+
+  const waitingListEl = document.getElementById('waiting-list');
   const contributorListEl = document.getElementById('contributors-list');
   const chatWindowEl = document.getElementById('chatWindow');
   const chatInputEl = document.getElementById('chatInput');
   const sendChatBtn = document.getElementById('sendChatBtn');
 
   /////////////////////////////////////////////////////
-  // Utility: Create WebSocket and set up handlers
+  // Initialize WebSocket
   /////////////////////////////////////////////////////
   function initWebSocket() {
     ws = new WebSocket(`wss://${window.location.host}`);
+
     ws.onopen = () => {
       console.log('WebSocket connected (studio).');
-      // Send join as studio
       ws.send(JSON.stringify({ type: 'join', role: 'studio', name: 'Studio' }));
     };
 
@@ -65,16 +69,20 @@
   function handleSignalingMessage(msg) {
     switch (msg.type) {
       case 'existing-remotes':
-        // { type:'existing-remotes', remotes: [ {id, name}, ... ] }
-        for (const { id, name } of msg.remotes) {
-          addContributorUI(id, name);
-          // We expect them to re-offer soon; do nothing until offer arrives
+        // { type:'existing-remotes', remotes: [ {id, name, state}, ... ] }
+        for (const { id, name, state } of msg.remotes) {
+          addRemoteToUI(id, name, state);
         }
         break;
 
       case 'new-remote':
-        // { type:'new-remote', id, name }
-        addContributorUI(msg.id, msg.name);
+        // { type:'new-remote', id, name, state:'waiting' }
+        addRemoteToUI(msg.id, msg.name, msg.state);
+        break;
+
+      case 'remote-state-change':
+        // { type:'remote-state-change', id, state }
+        updateRemoteState(msg.id, msg.state);
         break;
 
       case 'offer':
@@ -89,7 +97,7 @@
 
       case 'remote-disconnected':
         // { type:'remote-disconnected', id }
-        removeContributor(msg.id);
+        removeRemote(msg.id);
         break;
 
       case 'chat':
@@ -97,8 +105,8 @@
         appendChatMessage(msg.name, msg.message, msg.from === 'studio');
         break;
 
-      case 'studio-disconnected':
-        // This shouldn’t happen for the studio itself
+      case 'error':
+        console.error('Error from server:', msg.message);
         break;
 
       default:
@@ -107,39 +115,120 @@
   }
 
   /////////////////////////////////////////////////////
-  // Add a new contributor block in the UI
+  // Add a remote to the UI (in waiting or connected)
   /////////////////////////////////////////////////////
-  function addContributorUI(remoteID, remoteName) {
-    if (peers.has(remoteID)) return; // already exists
+  function addRemoteToUI(remoteID, remoteName, state) {
+    if (peers.has(remoteID)) return;
 
-    // List item container
-    const li = document.createElement('li');
-    li.id = `contributor-${remoteID}`;
-    li.className = 'contributor-item';
+    const entry = {};
+    entry.state = state;
 
-    // Name
+    // Create waiting-list <li>
+    const liWait = document.createElement('li');
+    liWait.id = `waiting-${remoteID}`;
+    liWait.className = 'contributor-item';
+
     const nameSpan = document.createElement('span');
     nameSpan.className = 'name';
     nameSpan.textContent = remoteName;
-    li.appendChild(nameSpan);
+    liWait.appendChild(nameSpan);
 
-    // Status
     const statusSpan = document.createElement('span');
     statusSpan.className = 'status';
     statusSpan.id = `status-${remoteID}`;
-    statusSpan.textContent = 'connecting...';
-    li.appendChild(statusSpan);
+    statusSpan.textContent = (state === 'waiting') ? 'waiting...' : state;
+    liWait.appendChild(statusSpan);
+
+    entry.statusSpan = statusSpan;
+
+    if (state === 'waiting') {
+      // Create “Connect” button
+      const connectBtn = document.createElement('button');
+      connectBtn.textContent = 'Connect';
+      connectBtn.onclick = () => {
+        ws.send(JSON.stringify({
+          type: 'connect-remote',
+          from: 'studio',
+          target: remoteID
+        }));
+        connectBtn.disabled = true;
+        statusSpan.textContent = 'connecting...';
+      };
+      liWait.appendChild(connectBtn);
+      entry.connectBtn = connectBtn;
+      waitingListEl.appendChild(liWait);
+      entry.liWaiting = liWait;
+      entry.liConnected = null;
+      entry.pc = null;
+    } else if (state === 'connected') {
+      // If server says “connected” right away (unlikely), put in connected UI
+      addConnectedUI(remoteID, remoteName);
+      entry.liWaiting = null;
+      entry.liConnected = document.getElementById(`connected-${remoteID}`);
+    }
+
+    peers.set(remoteID, entry);
+  }
+
+  /////////////////////////////////////////////////////
+  // Update a remote’s state (waiting → connecting → connected)
+  /////////////////////////////////////////////////////
+  function updateRemoteState(remoteID, newState) {
+    const entry = peers.get(remoteID);
+    if (!entry) return;
+    entry.state = newState;
+
+    if (newState === 'connecting') {
+      entry.statusSpan.textContent = 'connecting...';
+    } else if (newState === 'offered') {
+      entry.statusSpan.textContent = 'offered';
+    } else if (newState === 'connected') {
+      // Remove from waiting list (if exists)
+      if (entry.liWaiting) {
+        entry.liWaiting.remove();
+        entry.liWaiting = null;
+      }
+      // Create connected UI
+      addConnectedUI(remoteID);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Create the Connected Contributors UI
+  /////////////////////////////////////////////////////
+  function addConnectedUI(remoteID) {
+    const entry = peers.get(remoteID);
+    if (!entry) return;
+
+    const remoteName = entry.liWaiting
+      ? entry.liWaiting.querySelector('.name').textContent
+      : 'Unknown';
+
+    const liConn = document.createElement('li');
+    liConn.id = `connected-${remoteID}`;
+    liConn.className = 'contributor-item';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'name';
+    nameSpan.textContent = remoteName;
+    liConn.appendChild(nameSpan);
+
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'status';
+    statusSpan.id = `status-connected-${remoteID}`;
+    statusSpan.textContent = 'connected';
+    liConn.appendChild(statusSpan);
 
     // Mute/unmute button
     const muteBtn = document.createElement('button');
     muteBtn.textContent = 'Mute';
     muteBtn.className = 'mute-btn';
-    muteBtn.disabled = true; // only enabled after connection
+    muteBtn.disabled = true; // will enable when track arrives
     muteBtn.onclick = () => {
-      const entry = peers.get(remoteID);
-      if (!entry) return;
-      entry.audioElement.muted = !entry.audioElement.muted;
-      if (entry.audioElement.muted) {
+      const peer = peers.get(remoteID);
+      if (!peer) return;
+      peer.audioElement.muted = !peer.audioElement.muted;
+      if (peer.audioElement.muted) {
         muteBtn.textContent = 'Unmute';
         muteBtn.classList.add('active');
       } else {
@@ -147,19 +236,19 @@
         muteBtn.classList.remove('active');
       }
     };
-    li.appendChild(muteBtn);
+    liConn.appendChild(muteBtn);
 
-    // Meter canvas (stereo: draw two bars)
+    // Meter canvas
     const meterCanvas = document.createElement('canvas');
     meterCanvas.width = 100;
-    meterCanvas.height = 20; // two channels stacked
+    meterCanvas.height = 20;
     meterCanvas.className = 'meter-canvas';
     meterCanvas.id = `meter-${remoteID}`;
-    li.appendChild(meterCanvas);
+    liConn.appendChild(meterCanvas);
 
-    contributorListEl.appendChild(li);
+    contributorListEl.appendChild(liConn);
 
-    // Create hidden audio element to attach remote track
+    // Hidden audio element to play remote audio
     const audioEl = document.createElement('audio');
     audioEl.id = `audio-${remoteID}`;
     audioEl.autoplay = true;
@@ -167,45 +256,43 @@
     audioEl.muted = false;
     document.body.appendChild(audioEl);
 
-    // Prepare placeholders in peers map
-    peers.set(remoteID, {
-      pc: null,
-      audioElement: audioEl,
-      meterCanvas,
-      meterContext: meterCanvas.getContext('2d'),
-      analyserL: null,
-      analyserR: null,
-      statusSpan,
-      muteBtn
-    });
+    entry.liConnected = liConn;
+    entry.muteBtn = muteBtn;
+    entry.audioElement = audioEl;
+    entry.meterCanvas = meterCanvas;
+    entry.meterContext = meterCanvas.getContext('2d');
+    entry.analyserL = null;
+    entry.analyserR = null;
   }
 
   /////////////////////////////////////////////////////
-  // Remove a contributor from UI and cleanup
+  // Remove a remote from both UI lists
   /////////////////////////////////////////////////////
-  function removeContributor(remoteID) {
+  function removeRemote(remoteID) {
     const entry = peers.get(remoteID);
     if (!entry) return;
 
-    // Close RTCPeerConnection
     if (entry.pc) {
       entry.pc.close();
     }
-    // Remove audio element
     if (entry.audioElement) {
       entry.audioElement.srcObject = null;
       entry.audioElement.remove();
     }
-    // Remove DOM elements
-    const li = document.getElementById(`contributor-${remoteID}`);
-    if (li) li.remove();
-
-    entry.meterCanvas.remove();
+    if (entry.liWaiting) {
+      entry.liWaiting.remove();
+    }
+    if (entry.liConnected) {
+      entry.liConnected.remove();
+    }
+    if (entry.meterCanvas) {
+      entry.meterCanvas.remove();
+    }
     peers.delete(remoteID);
   }
 
   /////////////////////////////////////////////////////
-  // Handle incoming offer from a remote: create PC + answer
+  // Handle an incoming offer from a remote
   /////////////////////////////////////////////////////
   async function handleOffer(remoteID, sdp) {
     const entry = peers.get(remoteID);
@@ -214,94 +301,77 @@
       return;
     }
 
-    // Create RTCPeerConnection for this remoteID
-    const pc = new RTCPeerConnection(ICE_CONFIG);
-    entry.pc = pc;
+    // Create RTCPeerConnection if not exists
+    if (!entry.pc) {
+      const pc = new RTCPeerConnection(ICE_CONFIG);
+      entry.pc = pc;
 
-    // Update status
-    entry.statusSpan.textContent = 'connecting...';
+      // Parse Opus codec from SDP and append to status
+      const codecInfo = parseOpusInfo(sdp);
+      if (codecInfo) {
+        entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
+      }
 
-    // Parse codec details from SDP
-    const codecInfo = parseOpusInfo(sdp);
-    if (codecInfo) {
-      const codecSpan = document.createElement('span');
-      codecSpan.textContent = ` [codec: ${codecInfo}]`;
-      entry.statusSpan.appendChild(codecSpan);
+      // When remote track arrives
+      pc.ontrack = evt => {
+        const [remoteStream] = evt.streams;
+        entry.audioElement.srcObject = remoteStream;
+        setupMeter(remoteID, remoteStream);
+        entry.muteBtn.disabled = false;
+      };
+
+      // Send ICE candidates to remote
+      pc.onicecandidate = evt => {
+        if (evt.candidate) {
+          ws.send(
+            JSON.stringify({
+              type: 'candidate',
+              from: 'studio',
+              target: remoteID,
+              candidate: evt.candidate
+            })
+          );
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        entry.statusSpan.textContent = state;
+      };
     }
 
-    // When an incoming track arrives
-    pc.ontrack = evt => {
-      // Expecting one MediaStream with one or two tracks (stereo)
-      const [remoteStream] = evt.streams;
-      entry.audioElement.srcObject = remoteStream;
-
-      // Set up audio meter
-      setupMeter(remoteID, remoteStream);
-    };
-
-    // ICE candidates from studio → send to remote
-    pc.onicecandidate = evt => {
-      if (evt.candidate) {
-        ws.send(
-          JSON.stringify({
-            type: 'candidate',
-            from: 'studio',
-            target: remoteID,
-            candidate: evt.candidate
-          })
-        );
-      }
-    };
-
-    // Connection state handling
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      entry.statusSpan.textContent = state;
-      if (state === 'connected') {
-        entry.muteBtn.disabled = false;
-      } else {
-        entry.muteBtn.disabled = true;
-      }
-    };
-
-    // Set Remote SDP (offer)
     try {
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      await entry.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
     } catch (err) {
       console.error(`Failed to set remote description for ${remoteID}:`, err);
       return;
     }
 
-    // Create answer
+    // Create and send answer
     let answer;
     try {
-      answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+      answer = await entry.pc.createAnswer();
+      await entry.pc.setLocalDescription(answer);
     } catch (err) {
       console.error(`Failed to create/set local answer for ${remoteID}:`, err);
       return;
     }
 
-    // Send answer back to remote
     ws.send(
       JSON.stringify({
         type: 'answer',
         from: 'studio',
         target: remoteID,
-        sdp: pc.localDescription.sdp
+        sdp: entry.pc.localDescription.sdp
       })
     );
   }
 
   /////////////////////////////////////////////////////
-  // Handle incoming ICE candidate (either from remote or studio)
+  // Handle incoming ICE candidate (from remote)
   /////////////////////////////////////////////////////
   async function handleCandidate(from, candidate) {
-    if (from === 'studio') {
-      // candidate from studio? (unlikely in this direction)
-      return;
-    }
-
+    if (from === 'studio') return; // not expecting studio→studio
     const entry = peers.get(from);
     if (!entry || !entry.pc) {
       console.warn('Received candidate for non-existent PC:', from);
@@ -315,7 +385,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Parse Opus codec info from an SDP offer
+  // Parse Opus codec info from SDP (e.g. "Opus 48000Hz/2ch")
   /////////////////////////////////////////////////////
   function parseOpusInfo(sdp) {
     const lines = sdp.split('\n');
@@ -354,11 +424,9 @@
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
 
-    // Split channels
     const splitter = audioCtx.createChannelSplitter(2);
     src.connect(splitter);
 
-    // Two analyzers (L & R)
     const analyserL = audioCtx.createAnalyser();
     analyserL.fftSize = 256;
     const analyserR = audioCtx.createAnalyser();
@@ -369,13 +437,13 @@
 
     entry.analyserL = analyserL;
     entry.analyserR = analyserR;
+    entry.meterContext = entry.meterCanvas.getContext('2d');
 
-    // Start drawing
     drawMeter(remoteID);
   }
 
   /////////////////////////////////////////////////////
-  // Continuously draw the audio meter for a contributor
+  // Continuously draw audio meter (L=green, R=blue)
   /////////////////////////////////////////////////////
   function drawMeter(remoteID) {
     const entry = peers.get(remoteID);
@@ -390,26 +458,22 @@
       analyserL.getByteFrequencyData(dataArrayL);
       analyserR.getByteFrequencyData(dataArrayR);
 
-      // Compute RMS (approx) for each channel
       let sumL = 0,
         sumR = 0;
       for (let i = 0; i < bufferLength; i++) {
         sumL += dataArrayL[i] * dataArrayL[i];
         sumR += dataArrayR[i] * dataArrayR[i];
       }
-      const rmsL = Math.sqrt(sumL / bufferLength) / 255; // normalized 0..1
+      const rmsL = Math.sqrt(sumL / bufferLength) / 255;
       const rmsR = Math.sqrt(sumR / bufferLength) / 255;
 
-      // Clear canvas
       meterContext.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
 
-      // Draw left channel (top half)
-      meterContext.fillStyle = '#4caf50'; // green
+      meterContext.fillStyle = '#4caf50';
       const widthL = Math.round(rmsL * meterCanvas.width);
       meterContext.fillRect(0, 0, widthL, meterCanvas.height / 2 - 1);
 
-      // Draw right channel (bottom half)
-      meterContext.fillStyle = '#2196f3'; // blue
+      meterContext.fillStyle = '#2196f3';
       const widthR = Math.round(rmsR * meterCanvas.width);
       meterContext.fillRect(0, meterCanvas.height / 2 + 1, widthR, meterCanvas.height / 2 - 1);
 
@@ -420,14 +484,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Remove contributor logic (call from signaling)
-  /////////////////////////////////////////////////////
-  function removeContributorUI(remoteID) {
-    removeContributor(remoteID);
-  }
-
-  /////////////////////////////////////////////////////
-  // Chat logic (studio side)
+  // Chat: append message to chat window
   /////////////////////////////////////////////////////
   function appendChatMessage(senderName, message, isStudio) {
     const div = document.createElement('div');
@@ -444,7 +501,6 @@
   sendChatBtn.onclick = () => {
     const text = chatInputEl.value.trim();
     if (!text) return;
-    // Send to all remotes and also display locally
     const msgObj = {
       type: 'chat',
       from: 'studio',
