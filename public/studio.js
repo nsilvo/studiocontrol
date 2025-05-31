@@ -1,9 +1,10 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface (v5).
- * - Queues incoming ICE candidates until RTCPeerConnection exists.
- * - Maintains two-way audio and mutual mute as before.
+ * Front-end logic for the studio control interface (v7).
+ * - Ensures remote → studio audio is attached properly.
+ * - Maintains two-way audio (studio → remote) and mutual mute as before.
+ * - ICE candidate queuing logic remains (silently ignoring unknown peers).
  */
 
 (() => {
@@ -140,6 +141,7 @@
 
     const entry = { state, pendingCandidates: [] };
 
+    // Create waiting-list <li>
     const liWait = document.createElement('li');
     liWait.id = `waiting-${remoteID}`;
     liWait.className = 'contributor-item';
@@ -154,12 +156,13 @@
     statusSpan.id = `status-${remoteID}`;
     statusSpan.textContent = state === 'waiting' ? 'waiting...' : state;
     liWait.appendChild(statusSpan);
-
     entry.statusSpan = statusSpan;
+
     entry.remoteMuted = false;
     entry.localMuted = false;
 
     if (state === 'waiting') {
+      // "Connect" button
       const connectBtn = document.createElement('button');
       connectBtn.textContent = 'Connect';
       connectBtn.onclick = () => {
@@ -179,11 +182,13 @@
       waitingListEl.appendChild(liWait);
       entry.liWaiting = liWait;
     } else if (state === 'connected') {
+      // (unlikely to get "connected" without going through "waiting")
       addConnectedUI(remoteID, remoteName);
       entry.liWaiting = null;
       entry.liConnected = document.getElementById(`connected-${remoteID}`);
     }
 
+    // Initialize other fields
     entry.pc = null;
     entry.audioElementRemoteToStudio = null;
     entry.audioElementStudioToRemote = null;
@@ -198,7 +203,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Update a remote’s state (waiting → connecting → offered → connected)
+  // Update a remote’s state
   /////////////////////////////////////////////////////
   function updateRemoteState(remoteID, newState) {
     const entry = peers.get(remoteID);
@@ -210,6 +215,7 @@
     } else if (newState === 'offered') {
       entry.statusSpan.textContent = 'offered';
     } else if (newState === 'connected') {
+      // Move from waiting → connected UI
       if (entry.liWaiting) {
         entry.liWaiting.remove();
         entry.liWaiting = null;
@@ -219,7 +225,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Create the Connected Contributors UI (with Mute & Kick)
+  // Create Connected Contributors UI (with Mute & Kick)
   /////////////////////////////////////////////////////
   function addConnectedUI(remoteID) {
     const entry = peers.get(remoteID);
@@ -245,6 +251,7 @@
     liConn.appendChild(statusSpan);
     entry.statusSpan = statusSpan;
 
+    // Mute/Unmute Remote button
     const muteBtn = document.createElement('button');
     muteBtn.textContent = 'Mute Remote';
     muteBtn.className = 'mute-btn';
@@ -265,6 +272,7 @@
     liConn.appendChild(muteBtn);
     entry.muteBtn = muteBtn;
 
+    // Kick button
     const kickBtn = document.createElement('button');
     kickBtn.textContent = 'Kick';
     kickBtn.className = 'kick-btn';
@@ -284,6 +292,7 @@
     liConn.appendChild(kickBtn);
     entry.kickBtn = kickBtn;
 
+    // Audio meter canvas
     const meterCanvas = document.createElement('canvas');
     meterCanvas.width = 100;
     meterCanvas.height = 20;
@@ -296,6 +305,7 @@
     contributorListEl.appendChild(liConn);
     entry.liConnected = liConn;
 
+    // Hidden <audio> element for remote → studio audio
     const audioRemote = document.createElement('audio');
     audioRemote.id = `audio-remote-${remoteID}`;
     audioRemote.autoplay = true;
@@ -304,6 +314,7 @@
     document.body.appendChild(audioRemote);
     entry.audioElementRemoteToStudio = audioRemote;
 
+    // Hidden <audio> element for studio → remote audio
     const audioStudio = document.createElement('audio');
     audioStudio.id = `audio-studio-${remoteID}`;
     audioStudio.autoplay = true;
@@ -315,11 +326,12 @@
     entry.analyserL = null;
     entry.analyserR = null;
 
+    // Enable the Mute button now
     entry.muteBtn.disabled = false;
   }
 
   /////////////////////////////////////////////////////
-  // Remove a remote from both UI lists
+  // Remove a remote from UI and close PC
   /////////////////////////////////////////////////////
   function removeRemote(remoteID) {
     const entry = peers.get(remoteID);
@@ -349,7 +361,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Handle an incoming offer from a remote
+  // Handle incoming offer from remote
   /////////////////////////////////////////////////////
   async function handleOffer(remoteID, sdp) {
     const entry = peers.get(remoteID);
@@ -358,6 +370,7 @@
       return;
     }
 
+    // Ensure studio microphone is available
     if (!studioAudioStream) {
       try {
         studioAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -368,29 +381,39 @@
       }
     }
 
+    // Create RTCPeerConnection if needed
     if (!entry.pc) {
       const pc = new RTCPeerConnection(ICE_CONFIG);
       entry.pc = pc;
 
+      // Add studio → remote track
       if (studioAudioTrack) {
         pc.addTrack(studioAudioTrack, studioAudioStream);
       }
 
+      // Parse Opus info from offer
       const codecInfo = parseOpusInfo(sdp);
       if (codecInfo) {
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
       }
 
+      // Single ontrack handler for remote→studio and studio→remote
       pc.ontrack = (evt) => {
-        const [remoteStream] = evt.streams;
+        const [incomingStream] = evt.streams;
+        // If remote→studio audio not yet attached, do so
         if (!entry.audioElementRemoteToStudio.srcObject) {
-          entry.audioElementRemoteToStudio.srcObject = remoteStream;
-          setupMeter(remoteID, remoteStream);
-        } else if (!entry.audioElementStudioToRemote.srcObject && evt.track.kind === 'audio') {
-          entry.audioElementStudioToRemote.srcObject = remoteStream;
+          entry.audioElementRemoteToStudio.srcObject = incomingStream;
+          setupMeter(remoteID, incomingStream);
+        } else if (
+          // Otherwise, it must be the studio→remote track echoed (unlikely but kept for completeness)
+          !entry.audioElementStudioToRemote.srcObject &&
+          evt.track.kind === 'audio'
+        ) {
+          entry.audioElementStudioToRemote.srcObject = incomingStream;
         }
       };
 
+      // Handle ICE candidates from remote
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
@@ -409,7 +432,7 @@
         entry.statusSpan.textContent = state;
       };
 
-      // Drain queued ICE candidates
+      // Drain any queued ICE candidates
       entry.pendingCandidates.forEach((c) => {
         pc.addIceCandidate(new RTCIceCandidate(c)).catch((e) => {
           console.error('Error adding queued ICE candidate:', e);
@@ -418,6 +441,7 @@
       entry.pendingCandidates = [];
     }
 
+    // Set remote (offer) description
     try {
       await entry.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
     } catch (err) {
@@ -425,6 +449,7 @@
       return;
     }
 
+    // Create and send answer
     let answer;
     try {
       answer = await entry.pc.createAnswer();
@@ -450,10 +475,11 @@
   function handleCandidate(from, candidate) {
     const entry = peers.get(from);
     if (!entry) {
-      console.warn('Received candidate for non-existent PC:', from);
+      // Silently ignore if no peer exists at all
       return;
     }
     if (!entry.pc) {
+      // Queue candidate for later if PC not created yet
       entry.pendingCandidates.push(candidate);
       return;
     }
@@ -491,6 +517,7 @@
 
     for (const line of lines) {
       if (line.startsWith('a=rtpmap:') && line.includes('opus/48000')) {
+        // e.g. a=rtpmap:111 opus/48000/2
         const parts = line.trim().split(' ');
         const payload = parts[0].split(':')[1];
         const params = parts[1].split('/');
@@ -509,7 +536,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Set up stereo audio meter for remote → studio stream
+  // Set up stereo audio meter for remote → studio
   /////////////////////////////////////////////////////
   function setupMeter(remoteID, stream) {
     const entry = peers.get(remoteID);
