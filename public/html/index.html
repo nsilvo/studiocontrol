@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BRFM WebRTC System — Home</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="css/index.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem;
+      line-height: 1.6;
+    }
+    h1, h2 {
+      color: #333;
+    }
+    a {
+      color: #0066cc;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    ul {
+      margin-left: 1.5rem;
+    }
+    .section {
+      margin-bottom: 2rem;
+    }
+    .link-list li {
+      margin-bottom: 0.5rem;
+    }
+    .guide-note {
+      background: #f5f5f5;
+      border-left: 4px solid #ccc;
+      padding: 1rem;
+      margin: 1rem 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>BRFM WebRTC Remote Contribution System</h1>
+
+  <div class="section">
+    <h2>Overview</h2>
+    <p>
+      Welcome to the BRFM WebRTC contribution platform. This system allows remote contributors to send live audio into studio, and producers in one or more studios to manage incoming feeds, adjust settings, record, and chat in real time.
+    </p>
+    <p>
+      Use the links below to navigate to your role:
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>Studio Interfaces</h2>
+    <ul class="link-list">
+      <li>
+        <a href="studio1.html" target="_blank">Studio 1 Dashboard</a>  
+        — Producers in Studio 1 can monitor and manage all connected remotes.
+      </li>
+      <li>
+        <a href="studio2.html" target="_blank">Studio 2 Dashboard</a>  
+        — Producers in Studio 2 (if applicable) can also monitor/manage the same remotes concurrently.
+      </li>
+      <li>
+        <a href="studio3.html" target="_blank">Studio 3 Dashboard</a>  
+        — (Optional) Add additional “studioX.html” files for more producer stations.
+      </li>
+    </ul>
+    <div class="guide-note">
+      <strong>Tip:</strong>  
+      Open each studio dashboard in a separate browser/window. Each “studioX.html” is preconfigured to join as “Studio X.”  
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Remote Contributor Interfaces</h2>
+    <ul class="link-list">
+      <li>
+        <a href="remote.html" target="_blank">Standard Remote Page</a>  
+        — For general remote contributions (speech or music). Prompts for your name, then connects you to the selected studio when a producer initiates a call.
+      </li>
+      <li>
+        <a href="sports.html" target="_blank">Sports Remote Page</a>  
+        — Includes extra controls for sports reporting (goal button, score entry, team names, etc.) as well as local segment recording and chat.
+      </li>
+    </ul>
+    <div class="guide-note">
+      <strong>How to Share with a Contributor:</strong>  
+      Send the URL “<code>https://webrtc.brfm.net/remote.html</code>” (or “<code>https://webrtc.brfm.net/sports.html</code>” for sports).  
+      The remote will be prompted for a display name and must wait until the producer in a studio clicks “Call.”  
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Recordings & Uploads</h2>
+    <ul class="link-list">
+      <li>
+        <a href="recordings.html" target="_blank">Recordings Page</a>  
+        — Lists all previously stored recordings. You can view full waveforms, play back each file, and see a moving ticker overlay during playback.
+      </li>
+      <li>
+        <em>Server-Side:</em> Use the <code>POST /upload</code> endpoint to upload new files (handled by producer dashboards), and <code>GET /recordings</code> to retrieve a JSON list of stored recordings.
+      </li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>Getting Started</h2>
+    <ol>
+      <li>
+        <strong>Producers:</strong>  
+        Open your assigned studio dashboard (e.g. <a href="studio1.html" target="_blank">studio1.html</a> or <a href="studio2.html" target="_blank">studio2.html</a>).
+      </li>
+      <li>
+        Wait for remote contributors to navigate to <code>remote.html</code> (or <code>sports.html</code>) and enter their display names.
+      </li>
+      <li>
+        In the studio dashboard, each connected remote will appear under “Connected Remotes.” Click “Call” to initiate a WebRTC handshake with that remote.
+      </li>
+      <li>
+        Once the call is established, you can adjust <em>Mode</em> (speech vs. music), <em>Bitrate</em>, <em>Mute</em> or <em>Kick</em>, view per-remote PPM meters, jitter/bitrate graphs, chat with the remote, and record the audio feed.
+      </li>
+      <li>
+        Use the “Live Mixed Waveform” section to monitor the combined audio from all active remotes.
+      </li>
+      <li>
+        To upload files, either use the per-remote upload button in each remote card, or use the “Upload Existing Recordings” section to browse and send files directly to the server.
+      </li>
+      <li>
+        To review stored recordings, open the <a href="recordings.html" target="_blank">Recordings Page</a>.
+      </li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <h2>Helpful Tips</h2>
+    <ul>
+      <li>
+        All pages should be accessed over HTTPS (e.g. <code>https://webrtc.brfm.net/studio1.html</code>).
+      </li>
+      <li>
+        The WebSocket traffic is restricted to origin <code>https://webrtc.brfm.net</code>. If you copy to another hostname, update <code>ALLOWED_ORIGIN</code> in <code>server.js</code>.
+      </li>
+      <li>
+        If you need additional studios, simply copy <code>studio1.html</code> to <code>studio3.html</code>, change <code>window.STUDIO_ID</code> accordingly, and open that URL.
+      </li>
+      <li>
+        Remotes can reconnect automatically if their connection drops; they will show “Reconnecting…” until a producer calls again.
+      </li>
+      <li>
+        For sports coverage, instruct your reporter to use <code>https://webrtc.brfm.net/sports.html</code>, which includes goal/score controls and local segment recording.
+      </li>
+    </ul>
+  </div>
+
+  <footer>
+    <p>&copy; 2025 BRFM Radio Station — WebRTC Contribution System</p>
+  </footer>
+</body>
+</html>
