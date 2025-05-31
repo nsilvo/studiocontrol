@@ -1,9 +1,11 @@
 /**
  * remote.js (v4.1)
  *
- * Revised so that all `document.getElementById(...)` and `.onclick` bindings
- * happen inside `window.addEventListener('load', ...)` to ensure the elements
- * exist before we reference them.
+ * Revised so that:
+ *  1. We read “Your Name” from the input (#nameInput) at page load,
+ *     before sending { type:'join', role:'remote', name: displayName }.
+ *  2. If the input is blank, it falls back to "Remote".
+ *  3. All other behavior remains the same.
  */
 
 (() => {
@@ -23,7 +25,7 @@
   let localStream = null;
   let audioSender = null;
   let localID = null;
-  let displayName = 'Remote';
+  let displayName = 'Remote'; // default until overridden by input
   let isMuted = false;
   let isTone = false;
   let toneOscillator = null;
@@ -32,6 +34,7 @@
   let toneTimer = null;
 
   // UI elements (populated after load)
+  let nameInput;
   let statusSpan;
   let muteBtn;
   let toneBtn;
@@ -51,11 +54,15 @@
   // Initialize WebSocket & event listeners
   /////////////////////////////////////////////////////
   function initWebSocket() {
+    // Read the displayName from the nameInput field:
+    const typedName = nameInput.value.trim();
+    displayName = typedName === '' ? 'Remote' : typedName;
+
     ws = new WebSocket(`wss://${window.location.host}`);
     ws.onopen = () => {
       console.log('WebSocket connected (remote).');
       statusSpan.textContent = 'connected (WS)';
-      // Send join
+      // Send join with the chosen displayName
       ws.send(
         JSON.stringify({
           type: 'join',
@@ -455,6 +462,7 @@
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
     // Now that DOM is loaded, we can getElementById safely:
+    nameInput = document.getElementById('nameInput');
     statusSpan = document.getElementById('connStatus');
     muteBtn = document.getElementById('muteSelfBtn');
     toneBtn = document.getElementById('toneBtn');

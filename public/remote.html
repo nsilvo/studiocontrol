@@ -7,6 +7,7 @@
   <title>Remote Contributor</title>
   <!-- Link to your CSS file (if any) -->
   <link rel="stylesheet" href="style.css" />
+
   <style>
     /* Minimal inline styling for layout; you can override/extend in style.css */
     body {
@@ -17,6 +18,16 @@
     }
     h1 {
       margin-bottom: 10px;
+    }
+    #name-container {
+      margin-bottom: 15px;
+    }
+    #nameInput {
+      width: 300px;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
     }
     #controls {
       margin-bottom: 15px;
@@ -77,6 +88,11 @@
 </head>
 <body>
   <h1>Remote Contributor</h1>
+
+  <div id="name-container">
+    <label for="nameInput">Your Name:</label>
+    <input id="nameInput" type="text" placeholder="Enter your name" />
+  </div>
 
   <div>
     Connection status: <span id="connStatus">not connected</span>
