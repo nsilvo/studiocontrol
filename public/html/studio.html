@@ -6,8 +6,21 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <!-- 1) VU Meters for Studio Mic + Per-Remote -->
-  <div id="vuMetersContainer">
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- WebSocket Status Card (must have id="connStatus")            -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <div class="card" style="max-width: 900px; margin: 20px auto;">
+    <h1>Studio Control</h1>
+    <div>
+      <span style="color: var(--text-secondary);">WebSocket:</span>
+      <span id="connStatus">Not connected</span>
+    </div>
+  </div>
+
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 1) VU Meters for Studio Mic + Per‐Remote                      -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <div id="vuMetersContainer" style="max-width: 1000px; margin: 20px auto;">
     <!-- Studio Mic VU Meter -->
     <div class="vu-meter-vertical card" id="studioMeterCard">
       <div class="section-title">Studio Mic</div>
@@ -21,13 +34,17 @@
         <div>0</div>
       </div>
     </div>
-    <!-- Per-Remote meters will be injected here via JS -->
+    <!-- Per‐Remote VU meter cards will be injected here via JS -->
   </div>
 
-  <!-- 2) Connected Remotes appear here -->
-  <div id="remotesContainer"></div>
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 2) Connected Remotes appear here (top of page)               -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <div id="remotesContainer" style="max-width: 1000px; margin: 20px auto;"></div>
 
-  <!-- 3) Global Chat -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 3) Global Chat                                               -->
+  <!-- ────────────────────────────────────────────────────────────── -->
   <div id="chatContainer" class="card">
     <h2>Studio Chat</h2>
     <div id="chatWindow"></div>
@@ -37,7 +54,9 @@
     </div>
   </div>
 
-  <!-- 4) Recording Controls -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 4) Recording Controls                                        -->
+  <!-- ────────────────────────────────────────────────────────────── -->
   <div id="recordControls" class="card">
     <h2>Recording Controls</h2>
     <button id="recordBtn" class="btn">Start Recording</button>
@@ -46,7 +65,9 @@
     <canvas id="waveformCanvas" class="mt-10"></canvas>
   </div>
 
-  <!-- 5) Template for a single remote entry -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 5) Template for a single remote entry (250×150)             -->
+  <!-- ────────────────────────────────────────────────────────────── -->
   <template id="remoteEntryTemplate">
     <div class="remote-entry">
       <div class="remote-header">
@@ -91,7 +112,7 @@
         </div>
       </div>
 
-      <!-- Hidden by default, shown when “Toggle Stats” clicked -->
+      <!-- Hidden by default; shown by “Toggle Stats” -->
       <div class="flex-row justify-between mt-6">
         <div class="remote-meter" style="display:none;">
           <canvas width="70" height="30"></canvas>
@@ -107,7 +128,7 @@
         </div>
       </div>
 
-      <!-- Per‐remote chat area (small) -->
+      <!-- Per‐remote chat (small area) -->
       <div class="chat-section mt-6">
         <div class="chat-window"></div>
         <div class="flex-row mt-4">
