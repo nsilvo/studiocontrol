@@ -81,8 +81,8 @@ This repository provides a complete WebRTC-based remote audio contribution syste
 1. **Clone this repository**:
 
    ```bash
-   git clone https://github.com/yourusername/webrtc-radio-signaling.git
-   cd webrtc-radio-signaling
+   git clone https://github.com/nsilvo/studiocontrol.git
+   cd studiocontrol
    ```
 
 2. **Install dependencies**:
