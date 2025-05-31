@@ -20,10 +20,11 @@
   <!-- ────────────────────────────────────────────────────────────── -->
   <!-- 2) Main VU Meters (Horizontal)                               -->
   <!--    Two side‐by‐side meters: Studio Mic & Remote Mix          -->
+  <!--    (Per-remote meters will be appended here horizontally)   -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <div id="mainVuContainer" class="flex-row justify-between" style="max-width: 800px; margin: 0 auto;">
     <!-- 2a) Studio Mic Horizontal Meter -->
-    <div class="vu-meter-horizontal card">
+    <div class="vu-meter-horizontal card" id="studioMeterCard">
       <div class="section-title">Studio Mic</div>
       <canvas id="studioVuCanvas" width="300" height="20"></canvas>
       <div class="vu-legend-horizontal">
@@ -32,7 +33,7 @@
     </div>
 
     <!-- 2b) Remote Mix Horizontal Meter -->
-    <div class="vu-meter-horizontal card">
+    <div class="vu-meter-horizontal card" id="remoteMixMeterCard">
       <div class="section-title">Remote Mix</div>
       <canvas id="remoteMixVuCanvas" width="300" height="20"></canvas>
       <div class="vu-legend-horizontal">
