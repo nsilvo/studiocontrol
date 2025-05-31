@@ -19,8 +19,8 @@
 
   <!-- ────────────────────────────────────────────────────────────── -->
   <!-- 2) Main VU Meters (Horizontal)                               -->
-  <!--    Two side‐by‐side meters: Studio Mic & Remote Mix          -->
-  <!--    (Per-remote meters will be appended here horizontally)   -->
+  <!--    Two side‐by‐side: Studio Mic & Remote Mix                 -->
+  <!--    (Per‐remote meters will be appended here horizontally)    -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <div id="mainVuContainer" class="flex-row justify-between" style="max-width: 800px; margin: 0 auto;">
     <!-- 2a) Studio Mic Horizontal Meter -->
@@ -72,6 +72,7 @@
 
   <!-- ────────────────────────────────────────────────────────────── -->
   <!-- 6) Template for a single remote entry (250×150)             -->
+  <!--    Note: bitrateInput → bitrateSelect dropdown              -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <template id="remoteEntryTemplate">
     <div class="remote-entry">
@@ -87,7 +88,7 @@
         </div>
       </div>
 
-      <!-- Middle: No main VU meter here (handled above) → small controls -->
+      <!-- Middle: Controls (Mode + BitrateSelect + Toggle Stats) -->
       <div class="flex-row align-center mt-6">
         <div class="flex-col gap-4">
           <div class="remote-controls flex-row gap-4">
@@ -99,7 +100,12 @@
           </div>
           <div class="remote-controls flex-row gap-4">
             <label>Bitrate:</label>
-            <input type="number" class="bitrateInput" min="1000" max="128000" value="64000" />
+            <!-- Changed to three‐option select -->
+            <select class="bitrateSelect">
+              <option value="48000">48 kbps</option>
+              <option value="60000">60 kbps</option>
+              <option value="128000" selected>128 kbps</option>
+            </select>
           </div>
           <button class="toggleStatsBtn btn">Toggle Stats</button>
         </div>
