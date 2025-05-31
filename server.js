@@ -1,6 +1,5 @@
 // server.js
 
-// Use CommonJS modules
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -19,36 +18,34 @@ const app = express();
 const server = http.createServer(app);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1) STATIC FILE SERVING
+// 1) STATIC FILES
 //
 // We need to serve:
-//   • /studio.html, /remote.html, /sports.html, /recordings.html
-//     (which live in public/html/)
-//
-//   • all CSS/JS/image files under public/css/, public/js/, etc.
-//     (by serving public/ as a fallback).
+//   • /studio1.html, /studio2.html, /remote.html, /sports.html, /recordings.html
+//     (all live in public/html/)
+//   • everything under public/css/, public/js/, etc.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 1a. First, serve anything under public/html/ at the root path:
+// 1a. Serve any file under public/html/ at the root path:
 app.use(express.static(path.join(__dirname, 'public/html')));
 
-// 1b. Then, serve the rest of public/ (css/, js/, etc.) at the root as well:
+// 1b. Serve the rest of public/ (css/, js/, common assets) at root:
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2) FILE UPLOAD / RECORDINGS LISTING
+// 2) UPLOADS & RECORDING LIST
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Set up Multer to store uploads in "./recordings/"
+// Configure Multer to drop uploads into "./recordings/"
 const upload = multer({ dest: recordingsDir });
 
-// POST /upload → accept multipart/form-data field "files"
+// POST /upload → accept "files" field
 app.post('/upload', upload.array('files'), (req, res) => {
-  const uploadedFiles = req.files.map(file => file.filename);
+  const uploadedFiles = req.files.map(f => f.filename);
   res.json({ uploaded: uploadedFiles });
 });
 
-// GET /recordings → list all filenames in "./recordings/"
+// GET /recordings → return JSON array of filenames
 app.get('/recordings', (req, res) => {
   fs.readdir(recordingsDir, (err, files) => {
     if (err) {
@@ -66,17 +63,17 @@ app.use(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3) WEBSOCKET SIGNALING SERVER
+// 3) WEBSOCKET SIGNALING
 // ─────────────────────────────────────────────────────────────────────────────
 
 const wss = new WebSocket.Server({ noServer: true });
 const ALLOWED_ORIGIN = 'https://webrtc.brfm.net';
 
 // In-memory storage
-const studios = new Set();           // Set<WebSocket>
-const remotes = new Map();           // Map<remoteId, { ws: WebSocket, name: string }>
+const studios = new Set();           // Set< WebSocket >
+const remotes = new Map();           // Map< remoteId, { ws: WebSocket, name: string } >
 
-// Helper: broadcast a JSON message to all connected studios
+// Helper: send a JSON message to every connected studio
 function broadcastToStudios(message) {
   const json = JSON.stringify(message);
   studios.forEach(s => {
@@ -86,7 +83,7 @@ function broadcastToStudios(message) {
   });
 }
 
-// 3a. Handle HTTP → WebSocket upgrade, checking origin
+// 3a. Handle HTTP → WebSocket upgrade (only allow ALLOWED_ORIGIN)
 server.on('upgrade', (request, socket, head) => {
   const origin = request.headers.origin;
   if (origin !== ALLOWED_ORIGIN) {
@@ -99,9 +96,8 @@ server.on('upgrade', (request, socket, head) => {
   });
 });
 
-// 3b. Handle new WebSocket connections
+// 3b. Handle WebSocket connections
 wss.on('connection', ws => {
-  // Track whether this socket is a studio or a remote
   ws.isStudio = false;
   ws.isRemote = false;
   ws._remoteId = null;
@@ -111,19 +107,18 @@ wss.on('connection', ws => {
     try {
       msg = JSON.parse(messageData);
     } catch (err) {
-      console.error('Invalid JSON received:', err);
+      console.error('Invalid JSON:', err);
       return;
     }
 
     switch (msg.type) {
-
       case 'join':
-        // { type: "join", role: "studio" }
-        // or  { type: "join", role: "remote", name: "Alice" }
+        // Studio: { type:"join", role:"studio", studioId:"Studio 1" }
+        // Remote: { type:"join", role:"remote", name:"Alice" }
         if (msg.role === 'studio') {
           ws.isStudio = true;
           studios.add(ws);
-          // Send existing remotes to this newly-joined studio
+          // Send existing remotes to this new studio
           remotes.forEach((info, rid) => {
             ws.send(
               JSON.stringify({
@@ -148,7 +143,7 @@ wss.on('connection', ws => {
             })
           );
 
-          // Notify all studios of this new remote
+          // Broadcast to all studios that a new remote has joined
           broadcastToStudios({
             type: 'new-remote',
             id: remoteId,
@@ -158,7 +153,7 @@ wss.on('connection', ws => {
         break;
 
       case 'ready-for-offer':
-        // { type: "ready-for-offer", target: "<remoteId>" }
+        // { type:"ready-for-offer", target:"<remoteId>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -169,7 +164,7 @@ wss.on('connection', ws => {
         break;
 
       case 'offer':
-        // { type: "offer", from: "<remoteId>", sdp: "<sdp>" }
+        // { type:"offer", from:"<remoteId>", sdp:"<…>" }
         broadcastToStudios({
           type: 'offer',
           from: msg.from,
@@ -178,7 +173,7 @@ wss.on('connection', ws => {
         break;
 
       case 'answer':
-        // { type: "answer", from: "studio", target: "<remoteId>", sdp: "<sdp>" }
+        // { type:"answer", from:"studio", target:"<remoteId>", sdp:"<…>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -194,7 +189,7 @@ wss.on('connection', ws => {
         break;
 
       case 'candidate':
-        // { type: "candidate", from: "<id>", target: "studio"|"remote", candidate: {...}, to?: "<remoteId>" }
+        // { type:"candidate", from:"<id>", target:"studio"|"remote", candidate:{…}, to?:"<remoteId>" }
         {
           const fromId = msg.from;
           const candidate = msg.candidate;
@@ -223,7 +218,7 @@ wss.on('connection', ws => {
         break;
 
       case 'mute-remote':
-        // { type: "mute-remote", target: "<remoteId>" }
+        // { type:"mute-remote", target:"<remoteId>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -242,7 +237,7 @@ wss.on('connection', ws => {
         break;
 
       case 'kick-remote':
-        // { type: "kick-remote", target: "<remoteId>" }
+        // { type:"kick-remote", target:"<remoteId>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -259,7 +254,7 @@ wss.on('connection', ws => {
         break;
 
       case 'mode-update':
-        // { type: "mode-update", mode: "speech"|"music", target: "<remoteId>" }
+        // { type:"mode-update", mode:"speech"|"music", target:"<remoteId>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -278,7 +273,7 @@ wss.on('connection', ws => {
         break;
 
       case 'bitrate-update':
-        // { type: "bitrate-update", bitrate: <number>, target: "<remoteId>" }
+        // { type:"bitrate-update", bitrate:<number>, target:"<remoteId>" }
         {
           const targetId = msg.target;
           const remoteInfo = remotes.get(targetId);
@@ -298,19 +293,18 @@ wss.on('connection', ws => {
 
       case 'chat':
         // {
-        //   type: "chat",
-        //   fromRole: "studio"|"remote",
-        //   fromId: "<id>",
-        //   target: "studio"|"remote",
-        //   targetId?: "<remoteId>",
-        //   text: "<message>"
+        //   type:"chat",
+        //   fromRole:"studio"|"remote",
+        //   fromId:"<id>",
+        //   target:"studio"|"remote",
+        //   targetId?:"<remoteId>",
+        //   text:"<message>"
         // }
         {
           const fromRole = msg.fromRole;
           const fromId = msg.fromId;
           const text = msg.text;
           if (msg.target === 'studio') {
-            // Broadcast to all studios
             broadcastToStudios({
               type: 'chat',
               fromRole,
@@ -338,7 +332,7 @@ wss.on('connection', ws => {
         break;
 
       case 'goal':
-        // { type: "goal", fromId: "<remoteId>", team: "<teamName>" }
+        // { type:"goal", fromId:"<remoteId>", team:"<teamName>" }
         broadcastToStudios({
           type: 'goal',
           fromId: msg.fromId,
@@ -347,7 +341,7 @@ wss.on('connection', ws => {
         break;
 
       case 'ack-goal':
-        // { type: "ack-goal", targetId: "<remoteId>" }
+        // { type:"ack-goal", targetId:"<remoteId>" }
         {
           const targetId = msg.targetId;
           const remoteInfo = remotes.get(targetId);
@@ -369,7 +363,6 @@ wss.on('connection', ws => {
 
   ws.on('close', () => {
     if (ws.isRemote) {
-      // Remote disconnected
       const rid = ws._remoteId;
       if (rid && remotes.has(rid)) {
         remotes.delete(rid);
