@@ -169,6 +169,11 @@
     .chat-send-btn:hover {
       background-color: #218838;
     }
+    /* New: style the remote <audio> so we can hear each remote */
+    .remote-audio {
+      margin-top: 6px;
+      width: 100%;
+    }
   </style>
 </head>
 <body>
@@ -237,6 +242,9 @@
           <div class="graph-label">Bitrate</div>
         </div>
 
+        <!-- NEW: Audio element so studio can hear this remote -->
+        <audio class="remote-audio" controls autoplay></audio>
+
         <div class="chat-section">
           <div class="chat-window"></div>
           <input type="text" class="chat-input" placeholder="Type message..." />
@@ -246,6 +254,10 @@
     </div>
   </template>
 
+  <!-- Pre‐set this page’s studio ID before loading the main logic -->
+  <script>
+    window.STUDIO_ID = "Studio";
+  </script>
   <script src="js/common.js"></script>
   <script src="js/studio.js"></script>
 </body>
