@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Welcome to BRFM WebRTC Studio</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Minimal styling adjustments for index page */
+    .status-indicator {
+      font-weight: bold;
+      margin-bottom: 20px;
+    }
+    .btn-wrapper {
+      margin: 20px 0;
+    }
+    .btn-main {
+      display: inline-block;
+      padding: 15px 25px;
+      font-size: 1.2rem;
+      background: #007bff;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .btn-main:hover {
+      background: #0056b3;
+    }
+    .instructions {
+      background: #f9f9f9;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BRFM Remote Audio Contribution</h1>
+  </header>
+
+  <div class="container">
+    <!-- Studio status indicator -->
+    <div class="status-indicator" id="studioStatus">
+      Checking studio status...
+    </div>
+
+    <!-- Button to become a Remote Contributor -->
+    <div class="btn-wrapper">
+      <a href="remote.html" class="btn-main">Become a Remote Contributor</a>
+    </div>
+
+    <!-- Instructions block -->
+    <div class="instructions">
+      <h2>How to Use This System</h2>
+      <ol>
+        <li>
+          Click <strong>“Become a Remote Contributor”</strong> above. You’ll be taken to a page where you enter your name and join.
+        </li>
+        <li>
+          Once you allow microphone access, you will enter a “waiting” queue. The studio engineer must click “Connect” in their control panel to connect you.
+        </li>
+        <li>
+          After the studio approves, your browser will automatically send your audio via WebRTC. You can mute/unmute yourself or send a 1 kHz test tone.
+        </li>
+        <li>
+          Use the chat window to send messages to the studio, or receive messages from them.
+        </li>
+      </ol>
+      <p>
+        If you are the studio/engineer, go to <a href="studio.html">Studio Control Interface</a> to see a list of waiting contributors, connect them, and manage audio levels.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // When index.html loads, open a WebSocket to check if studio is connected.
+    (function() {
+      let ws;
+      const statusEl = document.getElementById('studioStatus');
+
+      function initWebSocket() {
+        ws = new WebSocket(`wss://${window.location.host}`);
+
+        ws.onopen = function() {
+          // Send a “check-studio” request
+          ws.send(JSON.stringify({ type: 'check-studio' }));
+        };
+
+        ws.onmessage = function(evt) {
+          let msg;
+          try {
+            msg = JSON.parse(evt.data);
+          } catch (err) {
+            console.error('Invalid JSON on index page:', err);
+            return;
+          }
+          if (msg.type === 'studio-status') {
+            if (msg.connected) {
+              statusEl.textContent = '🎙️ Studio is currently connected and online.';
+              statusEl.style.color = 'green';
+            } else {
+              statusEl.textContent = '🔴 Studio is not connected right now.';
+              statusEl.style.color = 'red';
+            }
+          }
+        };
+
+        ws.onclose = function() {
+          // If WS closes, attempt to reconnect in 5s
+          statusEl.textContent = '🔄 Reconnecting to check studio status...';
+          statusEl.style.color = 'gray';
+          setTimeout(initWebSocket, 5000);
+        };
+
+        ws.onerror = function(err) {
+          console.error('WebSocket error on index:', err);
+          ws.close();
+        };
+      }
+
+      window.addEventListener('load', function() {
+        statusEl.textContent = '🔄 Checking studio status...';
+        statusEl.style.color = 'gray';
+        initWebSocket();
+      });
+    })();
+  </script>
+</body>
+</html>
