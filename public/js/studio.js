@@ -1,108 +1,178 @@
 /**
  * public/js/studio.js
- * 
- * JavaScript logic for the Studio interface.
- * Handles:
- *  - WebSocket signaling (join as studio, receive new-remotes, offers, candidates, chat, goals)
- *  - For each remote: initiate call, handle incoming audio track
- *  - PPM meter, jitter & bitrate graphs, chat, recording, upload
+ *
+ * JavaScript logic for the Studio interface, now supporting multiple “studio” identities.
+ *
+ * 1. Wait for the user to select a studio from a dropdown and click “Join as Studio.”
+ * 2. Send { type:"join", role:"studio", studioId:"<chosen‐name>" } to the server.
+ * 3. Reveal the “studio-dashboard” and begin handling incoming remotes/offers/etc.
+ *
+ * Everything else (PPM meters, stats graphs, chat, recording, upload) remains the same.
  */
 
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 1) SETUP: Wait for “Join as Studio” click before actually joining
+ // ─────────────────────────────────────────────────────────────────────────────
+
 const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
-const ws = createReconnectingWebSocket(WS_URL);
+let ws = null;
+let myStudioId = null;
 
+// DOM references for the join‐studio panel and the main dashboard:
+const studioSelectPanel = document.getElementById('studio-select-panel');
+const studioSelect      = document.getElementById('studio-select');
+const joinStudioBtn     = document.getElementById('join-studio-btn');
+const studioDashboard   = document.getElementById('studio-dashboard');
+
+// Container inside #studio-dashboard where remote cards will appear
 const remotesContainer = document.getElementById('remotes-container');
-const recordingsDir = '/recordings'; // Base path where recordings are served
 
-// Data structures to track per-remote state
-const peers = new Map();         // remoteId → RTCPeerConnection
-const audioElements = new Map(); // remoteId → <audio> DOM element
-const meters = new Map();        // remoteId → { analyser, canvas } for PPM
-const statsIntervals = new Map();// remoteId → interval ID for stats polling
-const mediaRecorders = new Map();// remoteId → MediaRecorder
-const recordedChunks = new Map();// remoteId → Array of Blobs
+// Data structures to track per‐remote state
+const peers = new Map();           // remoteId → RTCPeerConnection
+const audioElements = new Map();   // remoteId → <audio> element
+const meters = new Map();          // remoteId → { analyser: AnalyserNode, canvas: HTMLElement }
+const statsIntervals = new Map();  // remoteId → interval ID for stats polling
+const mediaRecorders = new Map();  // remoteId → MediaRecorder
+const recordedChunks = new Map();  // remoteId → Array<Blob>
 
-// Upon opening WebSocket, join as studio
-ws.onMessage(msg => {
-  switch (msg.type) {
-    case 'new-remote':
-      addRemoteCard(msg.id, msg.name);
-      break;
-    case 'offer':
-      handleOffer(msg.from, msg.sdp);
-      break;
-    case 'candidate':
-      handleCandidate(msg.from, msg.candidate);
-      break;
-    case 'chat':
-      receiveChat(msg.fromRole, msg.fromId, msg.text);
-      break;
-    case 'remote-disconnected':
-      removeRemoteCard(msg.id);
-      break;
-    case 'goal':
-      handleGoalNotification(msg.fromId, msg.team);
-      break;
-    default:
-      console.warn('Studio received unknown message:', msg);
+// Only start WebSocket/remote‐handling once “Join as Studio” is clicked:
+joinStudioBtn.addEventListener('click', () => {
+  const selected = studioSelect.value;
+  if (!selected) {
+    alert('Please select a studio name before joining.');
+    return;
   }
+  myStudioId = selected;
+  initializeWebSocketAsStudio(myStudioId);
+
+  // Hide the “select studio” panel, reveal the dashboard
+  studioSelectPanel.classList.add('hidden');
+  studioDashboard.classList.remove('hidden');
 });
 
-ws.send({ type: 'join', role: 'studio' });
 
-// --- UI Helpers ---
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 2) INITIALIZE WEBSOCKET ONCE we have a studioId
+ // ─────────────────────────────────────────────────────────────────────────────
+
+function initializeWebSocketAsStudio(studioId) {
+  ws = createReconnectingWebSocket(WS_URL);
+
+  ws.onMessage(msg => {
+    switch (msg.type) {
+      case 'new-remote':
+        addRemoteCard(msg.id, msg.name);
+        break;
+
+      case 'offer':
+        handleOffer(msg.from, msg.sdp);
+        break;
+
+      case 'candidate':
+        handleCandidate(msg.from, msg.candidate);
+        break;
+
+      case 'chat':
+        receiveChat(msg.fromRole, msg.fromId, msg.text);
+        break;
+
+      case 'remote-disconnected':
+        removeRemoteCard(msg.id);
+        break;
+
+      case 'goal':
+        handleGoalNotification(msg.fromId, msg.team);
+        break;
+
+      default:
+        console.warn('Studio received unknown message:', msg);
+    }
+  });
+
+  // Once WebSocket connects, send our “join” with the chosen studioId
+  ws.onOpen = () => {
+    console.log(`WebSocket connected. Joining as studio: ${studioId}`);
+    ws.send({ type: 'join', role: 'studio', studioId: studioId });
+  };
+
+  ws.onClose = () => {
+    console.warn('WebSocket closed. Attempting reconnect in 2 seconds...');
+    setTimeout(() => {
+      initializeWebSocketAsStudio(studioId);
+    }, 2000);
+  };
+
+  ws.onError = err => {
+    console.error('WebSocket error:', err);
+    ws.close();
+  };
+}
+
+
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 3) ADD & REMOVE “REMOTE CARDS” (one per connected remote)
+ // ─────────────────────────────────────────────────────────────────────────────
 
 function addRemoteCard(remoteId, name) {
+  // Outer card <div id="remote-<remoteId>" class="remote-card">
   const card = document.createElement('div');
   card.className = 'remote-card';
   card.id = `remote-${remoteId}`;
 
+  // Title with remote’s display name
   const title = document.createElement('h2');
-  title.textContent = `${name} (${remoteId.substring(0, 8)})`;
+  title.textContent = `${name} (${ remoteId.substring(0,8) })`;
   card.appendChild(title);
 
-  // Call button
+  // “Call” button
   const callBtn = document.createElement('button');
   callBtn.textContent = 'Call';
-  callBtn.onclick = () => initiateCall(remoteId);
+  callBtn.onclick = () => {
+    ws.send({ type: 'ready-for-offer', target: remoteId, studioId: myStudioId });
+  };
   card.appendChild(callBtn);
 
-  // Mute button
+  // “Mute” button
   const muteBtn = document.createElement('button');
   muteBtn.textContent = 'Mute';
   muteBtn.onclick = () => {
-    ws.send({ type: 'mute-remote', target: remoteId });
+    ws.send({ type: 'mute-remote', target: remoteId, studioId: myStudioId });
   };
   card.appendChild(muteBtn);
 
-  // Kick button
+  // “Kick” button
   const kickBtn = document.createElement('button');
   kickBtn.textContent = 'Kick';
   kickBtn.onclick = () => {
-    ws.send({ type: 'kick-remote', target: remoteId });
+    ws.send({ type: 'kick-remote', target: remoteId, studioId: myStudioId });
   };
   card.appendChild(kickBtn);
 
-  // Mode selector
+  // Mode‐select dropdown (Speech vs. Music)
   const modeGroup = document.createElement('div');
   modeGroup.className = 'control-group';
   const modeLabel = document.createElement('label');
   modeLabel.textContent = 'Mode:';
   modeGroup.appendChild(modeLabel);
   const modeSelect = document.createElement('select');
-  ['speech', 'music'].forEach(m => {
+  ['speech','music'].forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;
     opt.textContent = m.charAt(0).toUpperCase() + m.slice(1);
     modeSelect.appendChild(opt);
   });
   modeSelect.onchange = () => {
-    ws.send({ type: 'mode-update', mode: modeSelect.value, target: remoteId });
+    ws.send({
+      type: 'mode-update',
+      mode: modeSelect.value,
+      target: remoteId,
+      studioId: myStudioId
+    });
   };
   modeGroup.appendChild(modeSelect);
   card.appendChild(modeGroup);
 
-  // Bitrate input
+  // Bitrate input (number)
   const bitrateGroup = document.createElement('div');
   bitrateGroup.className = 'control-group';
   const bitrateLabel = document.createElement('label');
@@ -115,12 +185,17 @@ function addRemoteCard(remoteId, name) {
   bitrateInput.value = 16000;
   bitrateInput.onchange = () => {
     const br = parseInt(bitrateInput.value);
-    ws.send({ type: 'bitrate-update', bitrate: br, target: remoteId });
+    ws.send({
+      type: 'bitrate-update',
+      bitrate: br,
+      target: remoteId,
+      studioId: myStudioId
+    });
   };
   bitrateGroup.appendChild(bitrateInput);
   card.appendChild(bitrateGroup);
 
-  // Hidden audio element for remote stream
+  // Hidden <audio> tag for the actual remote‐audio stream
   const audioEl = document.createElement('audio');
   audioEl.autoplay = true;
   audioEl.controls = false;
@@ -128,21 +203,21 @@ function addRemoteCard(remoteId, name) {
   card.appendChild(audioEl);
   audioElements.set(remoteId, audioEl);
 
-  // PPM meter canvas
+  // PPM meter canvas (mono → display left+right the same if remote is mono)
   const meterCanvas = document.createElement('canvas');
   meterCanvas.width = 300;
   meterCanvas.height = 50;
   meterCanvas.className = 'meter-canvas';
   card.appendChild(meterCanvas);
 
-  // Stats graph canvas (jitter & bitrate)
+  // Jitter & bitrate stats graph canvas
   const statsCanvas = document.createElement('canvas');
   statsCanvas.width = 300;
   statsCanvas.height = 50;
   statsCanvas.className = 'stats-canvas';
   card.appendChild(statsCanvas);
 
-  // Chat UI
+  // Chat interface for this remote
   const chatContainer = document.createElement('div');
   chatContainer.className = 'chat-container';
   const chatMsgBox = document.createElement('div');
@@ -163,7 +238,7 @@ function addRemoteCard(remoteId, name) {
     ws.send({
       type: 'chat',
       fromRole: 'studio',
-      fromId: 'studio',
+      fromId: myStudioId,
       target: 'remote',
       targetId: remoteId,
       text
@@ -174,7 +249,7 @@ function addRemoteCard(remoteId, name) {
   chatContainer.appendChild(chatSendBtn);
   card.appendChild(chatContainer);
 
-  // Recording controls
+  // Recording controls (Start/Stop)
   const recContainer = document.createElement('div');
   recContainer.className = 'recording-controls';
   const recStartBtn = document.createElement('button');
@@ -187,7 +262,7 @@ function addRemoteCard(remoteId, name) {
   recContainer.appendChild(recStopBtn);
   card.appendChild(recContainer);
 
-  // Upload container
+  // File‐upload controls
   const uploadContainer = document.createElement('div');
   uploadContainer.className = 'upload-container';
   const uploadLabel = document.createElement('label');
@@ -216,10 +291,10 @@ function addRemoteCard(remoteId, name) {
   uploadContainer.appendChild(uploadBtn);
   card.appendChild(uploadContainer);
 
-  // Append card to container
+  // Finally, append to the remotes container
   remotesContainer.appendChild(card);
 
-  // Store PPM canvas reference
+  // Initialize placeholders for PPM analyser and stats
   meters.set(remoteId, { analyser: null, canvas: meterCanvas });
   statsIntervals.set(remoteId, null);
 }
@@ -227,7 +302,8 @@ function addRemoteCard(remoteId, name) {
 function removeRemoteCard(remoteId) {
   const card = document.getElementById(`remote-${remoteId}`);
   if (card) card.remove();
-  // Clean up peer, recorder, etc.
+
+  // Clean up any associated resources
   if (peers.has(remoteId)) {
     peers.get(remoteId).close();
     peers.delete(remoteId);
@@ -242,7 +318,7 @@ function removeRemoteCard(remoteId) {
   if (recordedChunks.has(remoteId)) recordedChunks.delete(remoteId);
 }
 
-// Append a chat message to a given chat box
+// Append a chat message into the appropriate chat box
 function appendChatMessage(chatBox, sender, text) {
   const msg = document.createElement('div');
   msg.textContent = `[${sender}]: ${text}`;
@@ -250,7 +326,7 @@ function appendChatMessage(chatBox, sender, text) {
   chatBox.scrollTop = chatBox.scrollHeight;
 }
 
-// Handle incoming chat (to studio)
+// Handle incoming chat (to the studio)
 function receiveChat(fromRole, fromId, text) {
   if (fromRole === 'remote') {
     const chatBox = document.getElementById(`chat-${fromId}`);
@@ -258,9 +334,9 @@ function receiveChat(fromRole, fromId, text) {
   }
 }
 
-// Handle goal notifications from sports remotes
+// Handle a “goal” notification from a sports remote
 function handleGoalNotification(remoteId, team) {
-  alert(`⚽ Goal by ${team} from remote ${remoteId.substring(0,8)}!`);
+  alert(`⚽ Goal by ${team} from remote ${remoteId.substring(0, 8)}!`);
   const card = document.getElementById(`remote-${remoteId}`);
   if (card) {
     card.style.boxShadow = '0 0 10px 3px gold';
@@ -270,7 +346,7 @@ function handleGoalNotification(remoteId, team) {
       ackBtn.textContent = 'Acknowledge Goal';
       ackBtn.className = 'ack-goal-btn';
       ackBtn.onclick = () => {
-        ws.send({ type: 'ack-goal', targetId: remoteId });
+        ws.send({ type: 'ack-goal', targetId: remoteId, studioId: myStudioId });
         card.style.boxShadow = '';
         ackBtn.remove();
       };
@@ -279,10 +355,14 @@ function handleGoalNotification(remoteId, team) {
   }
 }
 
-// --- WebRTC Call Handling ---
+
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 4) WEBRTC CALL HANDLING & STATS
+ // ─────────────────────────────────────────────────────────────────────────────
 
 function initiateCall(remoteId) {
-  ws.send({ type: 'ready-for-offer', target: remoteId });
+  // Tell server: “Studio <myStudioId> wants to initiate a call with <remoteId>”
+  ws.send({ type: 'ready-for-offer', target: remoteId, studioId: myStudioId });
 }
 
 async function handleOffer(remoteId, sdp) {
@@ -311,7 +391,8 @@ async function handleOffer(remoteId, sdp) {
         from: 'studio',
         target: 'remote',
         to: remoteId,
-        candidate: event.candidate
+        candidate: event.candidate,
+        studioId: myStudioId
       });
     }
   };
@@ -324,7 +405,8 @@ async function handleOffer(remoteId, sdp) {
     type: 'answer',
     from: 'studio',
     target: remoteId,
-    sdp: pc.localDescription.sdp
+    sdp: pc.localDescription.sdp,
+    studioId: myStudioId
   });
 }
 
@@ -339,6 +421,7 @@ async function handleCandidate(remoteId, candidate) {
   }
 }
 
+// Collect and plot jitter & bitrate stats for a peer connection
 function startRTCPeerStats(pc, canvas, remoteId) {
   const ctx = canvas.getContext('2d');
   const WIDTH = canvas.width;
@@ -355,6 +438,7 @@ function startRTCPeerStats(pc, canvas, remoteId) {
       });
       if (!inboundStats) return;
 
+      // Calculate bitrate in kbps
       let bitrateKbps = 0;
       if (lastBytesReceived) {
         const bytesDelta = inboundStats.bytesReceived - lastBytesReceived;
@@ -362,20 +446,35 @@ function startRTCPeerStats(pc, canvas, remoteId) {
       }
       lastBytesReceived = inboundStats.bytesReceived;
 
+      // Jitter in ms
       const jitterMs = inboundStats.jitter * 1000;
 
+      // Shift canvas left by 1px
       const imageData = ctx.getImageData(1, 0, WIDTH - 1, HEIGHT);
       ctx.putImageData(imageData, 0, 0);
       ctx.clearRect(WIDTH - 1, 0, 1, HEIGHT);
 
-      const jitterY = HEIGHT / 2 - (jitterMs / 10);
-      const bitrateY = HEIGHT - (bitrateKbps / 10);
+      // Map jitter & bitrate to vertical coordinates
+      const jitterY = HEIGHT / 2 - (jitterMs / 10);      // scale jitter
+      const bitrateY = HEIGHT - (bitrateKbps / 10);      // scale bitrate
 
+      // Draw jitter (red) in top half
       ctx.fillStyle = 'red';
-      ctx.fillRect(WIDTH - 1, Math.max(0, Math.min(HEIGHT / 2, jitterY)), 1, 1);
+      ctx.fillRect(
+        WIDTH - 1,
+        Math.max(0, Math.min(HEIGHT / 2, jitterY)),
+        1,
+        1
+      );
 
+      // Draw bitrate (lime) in bottom half
       ctx.fillStyle = 'lime';
-      ctx.fillRect(WIDTH - 1, Math.max(HEIGHT / 2, Math.min(HEIGHT - 1, bitrateY)), 1, 1);
+      ctx.fillRect(
+        WIDTH - 1,
+        Math.max(HEIGHT / 2, Math.min(HEIGHT - 1, bitrateY)),
+        1,
+        1
+      );
     });
   }
 
@@ -383,7 +482,10 @@ function startRTCPeerStats(pc, canvas, remoteId) {
   statsIntervals.set(remoteId, intervalId);
 }
 
-// --- Recording Handling ---
+
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 5) RECORDING HANDLING
+ // ─────────────────────────────────────────────────────────────────────────────
 
 function startRecording(remoteId) {
   const audioEl = audioElements.get(remoteId);
@@ -426,8 +528,12 @@ function stopRecording(remoteId) {
   }
 }
 
-// Release resources when leaving page
+
+ // ─────────────────────────────────────────────────────────────────────────────
+ // 6) CLEANUP ON UNLOAD
+ // ─────────────────────────────────────────────────────────────────────────────
+
 window.addEventListener('beforeunload', () => {
   peers.forEach(pc => pc.close());
-  ws.close();
+  if (ws) ws.close();
 });
