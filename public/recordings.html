@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recorded Sessions</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+      color: #333;
+    }
+    h1 {
+      margin-bottom: 10px;
+    }
+    .recording-entry {
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 20px;
+    }
+    .recording-title {
+      font-size: 1.1em;
+      margin-bottom: 5px;
+    }
+    .waveform-container {
+      position: relative;
+      margin-bottom: 10px;
+    }
+    .waveform-canvas {
+      border: 1px solid #666;
+      background: #222;
+    }
+    .ticker {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(255, 0, 0, 0.75);
+      pointer-events: none;
+    }
+    .controls {
+      margin-top: 5px;
+    }
+    .controls button {
+      padding: 6px 10px;
+      border: none;
+      background-color: #0066cc;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    .controls button:hover {
+      background-color: #005bb5;
+    }
+  </style>
+</head>
+<body>
+  <h1>Recorded Sessions</h1>
+  <div id="recordingsContainer">
+    <!-- Entries will be appended here -->
+  </div>
+
+  <script src="recordings.js"></script>
+</body>
+</html>

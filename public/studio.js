@@ -7,7 +7,8 @@
  *   • Creates an AudioContext + two AnalyserNodes to meter left/right channels.
  *   • Draws those meters onto that remote’s <canvas>.
  *   • Provides “Mute” & “Kick” buttons.
- * - Cleanly removes UI & audio nodes when a remote disconnects.
+ * - Implements multi‐track recording (studio mix + each remote) with waveform display & timer.
+ * - When recording stops, uploads all recorded blobs to the server at /upload.
  */
 
 (() => {
@@ -23,13 +24,21 @@
   };
 
   let ws = null;
-  // peers maps peerId → { pc, entryEl, audioContext, analyserL, analyserR, rafId }
+  // peers maps peerId → { pc, entryEl, audioContext, analyserL, analyserR, rafId, mediaStream }
   const peers = new Map();
 
   // DOM references
   const connStatusSpan = document.getElementById('connStatus');
   const remotesContainer = document.getElementById('remotesContainer');
   const remoteEntryTemplate = document.getElementById('remoteEntryTemplate');
+
+  // Recording controls (create these in HTML or add here dynamically)
+  let recordBtn, stopRecordBtn, recorderTimerSpan, waveformCanvas;
+  let studioAudioContext, studioMixedStream, studioRecorder;
+  let remoteRecorders = new Map(); // remoteId → MediaRecorder
+  let mediaStreamsToRecord = new Map(); // remoteId → MediaStream
+  let recordingStartTime = null;
+  let recorderTimerInterval = null;
 
   /////////////////////////////////////////////////////
   // Initialize WebSocket
@@ -98,10 +107,6 @@
         teardownPeer(msg.id);
         break;
 
-      case 'chat':
-        // Optionally handle chat messages here
-        break;
-
       default:
         console.warn('Unknown WS message (studio):', msg.type);
     }
@@ -167,6 +172,9 @@
       const [remoteStream] = evt.streams;
       statusEl.textContent = 'Connected';
 
+      // Store the remote’s stream for recording
+      mediaStreamsToRecord.set(remoteId, remoteStream);
+
       // Create an AudioContext + AnalyserNodes for this remote
       const audioContext = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 48000,
@@ -221,7 +229,7 @@
       }
       drawMeters();
 
-      // Store references so we can clean up later
+      // Save references so we can clean up later
       const existing = peers.get(remoteId) || {};
       peers.set(remoteId, {
         ...existing,
@@ -231,6 +239,7 @@
         analyserL,
         analyserR,
         rafId: null,
+        mediaStream: remoteStream,
       });
     };
 
@@ -242,6 +251,7 @@
       analyserL: null,
       analyserR: null,
       rafId: null,
+      mediaStream: null,
     });
 
     // 5) Notify remote to send an offer
@@ -319,6 +329,222 @@
     }
 
     peers.delete(remoteId);
+    mediaStreamsToRecord.delete(remoteId);
+  }
+
+  /////////////////////////////////////////////////////
+  // Initialize recording controls
+  /////////////////////////////////////////////////////
+  function initRecordingControls() {
+    // Create buttons and waveform canvas dynamically or assume they exist in HTML.
+    // For simplicity, we assume the following HTML is present in studio.html:
+    //
+    // <button id="recordBtn">Start Recording</button>
+    // <button id="stopRecordBtn" disabled>Stop Recording</button>
+    // <span id="recTimer">00:00</span>
+    // <canvas id="waveformCanvas" width="800" height="200"></canvas>
+    //
+    recordBtn = document.getElementById('recordBtn');
+    stopRecordBtn = document.getElementById('stopRecordBtn');
+    recorderTimerSpan = document.getElementById('recTimer');
+    waveformCanvas = document.getElementById('waveformCanvas');
+
+    recordBtn.onclick = startRecording;
+    stopRecordBtn.onclick = stopRecording;
+  }
+
+  /////////////////////////////////////////////////////
+  // Start multi‐track recording
+  /////////////////////////////////////////////////////
+  async function startRecording() {
+    if (mediaStreamsToRecord.size === 0) {
+      alert('No remotes connected – nothing to record.');
+      return;
+    }
+
+    recordBtn.disabled = true;
+    stopRecordBtn.disabled = false;
+
+    // 1) Create a new AudioContext for mixing all tracks (including optional studio mic)
+    studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+
+    // 2) Create a destination node for the studio “mix” (if desired)
+    const mixedDest = studioAudioContext.createMediaStreamDestination();
+
+    // 3) For each remote’s MediaStream, create a MediaStreamSource → connect to mix
+    mediaStreamsToRecord.forEach((remoteStream, remoteId) => {
+      const srcNode = studioAudioContext.createMediaStreamSource(remoteStream);
+      srcNode.connect(mixedDest);
+      // Also set up a separate MediaRecorder for each remote if you want individual files
+      const recorder = new MediaRecorder(remoteStream);
+      const chunks = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        uploadRecording(`${remoteId}.webm`, blob);
+      };
+      recorder.start();
+      remoteRecorders.set(remoteId, recorder);
+    });
+
+    // 4) Optionally capture studio mic as a separate track (uncomment if you want)
+    // try {
+    //   const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    //   const micSrc = studioAudioContext.createMediaStreamSource(micStream);
+    //   micSrc.connect(mixedDest);
+    //   const micRecorder = new MediaRecorder(micStream);
+    //   const micChunks = [];
+    //   micRecorder.ondataavailable = (e) => {
+    //     if (e.data.size > 0) micChunks.push(e.data);
+    //   };
+    //   micRecorder.onstop = () => {
+    //     const blob = new Blob(micChunks, { type: 'audio/webm' });
+    //     uploadRecording(`studio_mic.webm`, blob);
+    //   };
+    //   micRecorder.start();
+    //   remoteRecorders.set('studio_mic', micRecorder);
+    // } catch (err) {
+    //   console.warn('Studio mic unavailable:', err);
+    // }
+
+    // 5) Also create a combined recorder (studio mix of all remotes) if you want a single file
+    studioRecorder = new MediaRecorder(mixedDest.stream);
+    const combinedChunks = [];
+    studioRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        combinedChunks.push(e.data);
+      }
+    };
+    studioRecorder.onstop = () => {
+      const blob = new Blob(combinedChunks, { type: 'audio/webm' });
+      uploadRecording(`combined_${Date.now()}.webm`, blob);
+    };
+    studioRecorder.start();
+
+    // 6) Start drawing real‐time waveform on waveformCanvas
+    drawWaveform(mixedDest.stream);
+
+    // 7) Start timer
+    recordingStartTime = Date.now();
+    recorderTimerInterval = setInterval(updateTimer, 500);
+  }
+
+  /////////////////////////////////////////////////////
+  // Stop recording
+  /////////////////////////////////////////////////////
+  function stopRecording() {
+    recordBtn.disabled = false;
+    stopRecordBtn.disabled = true;
+
+    // 1) Stop all remote recorders
+    remoteRecorders.forEach((recorder) => {
+      if (recorder && recorder.state === 'recording') {
+        recorder.stop();
+      }
+    });
+    remoteRecorders.clear();
+
+    // 2) Stop studio combined recorder
+    if (studioRecorder && studioRecorder.state === 'recording') {
+      studioRecorder.stop();
+      studioRecorder = null;
+    }
+
+    // 3) Stop waveform drawing
+    cancelAnimationFrame(drawingRaf);
+    clearCanvas(waveformCanvas);
+    drawingRaf = null;
+
+    // 4) Stop timer
+    clearInterval(recorderTimerInterval);
+    recorderTimerInterval = null;
+    recorderTimerSpan.textContent = '00:00';
+  }
+
+  /////////////////////////////////////////////////////
+  // Upload a single recording blob to server
+  /////////////////////////////////////////////////////
+  async function uploadRecording(filename, blob) {
+    const formData = new FormData();
+    formData.append('files', blob, filename);
+    try {
+      const resp = await fetch('/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      const json = await resp.json();
+      console.log('Uploaded:', json.uploaded);
+    } catch (err) {
+      console.error('Upload error:', err);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Draw real‐time waveform for a given MediaStream
+  /////////////////////////////////////////////////////
+  let drawingRaf = null;
+  function drawWaveform(stream) {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+
+    const canvas = waveformCanvas;
+    const ctx = canvas.getContext('2d');
+    const bufferLength = analyser.fftSize;
+    const dataArray = new Uint8Array(bufferLength);
+
+    function draw() {
+      analyser.getByteTimeDomainData(dataArray);
+
+      ctx.fillStyle = '#222';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#0f0';
+      ctx.beginPath();
+
+      const sliceWidth = (canvas.width * 1.0) / bufferLength;
+      let x = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = (v * canvas.height) / 2;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+        x += sliceWidth;
+      }
+      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.stroke();
+
+      drawingRaf = requestAnimationFrame(draw);
+    }
+    draw();
+  }
+
+  function clearCanvas(canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  /////////////////////////////////////////////////////
+  // Update recording timer display
+  /////////////////////////////////////////////////////
+  function updateTimer() {
+    const elapsedMs = Date.now() - recordingStartTime;
+    const seconds = Math.floor(elapsedMs / 1000);
+    const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const secs = String(seconds % 60).padStart(2, '0');
+    recorderTimerSpan.textContent = `${mins}:${secs}`;
   }
 
   /////////////////////////////////////////////////////
@@ -326,5 +552,6 @@
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
     initWebSocket();
+    initRecordingControls();
   });
 })();

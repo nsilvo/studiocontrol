@@ -4,106 +4,239 @@
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Studio Control</title>
+  <title>Studio Control Interface</title>
   <link rel="stylesheet" href="style.css" />
   <style>
-    /* Minimal inline styling; override in style.css as needed */
+    /* ---------- Global Styles ---------- */
     body {
       font-family: Arial, sans-serif;
       margin: 20px;
       background: #f5f5f5;
       color: #333;
     }
-    h1 {
+    h1, h2 {
       margin-bottom: 10px;
     }
-    #remotesContainer {
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 10px;
+      background-color: #0066cc;
+      color: #fff;
+      font-size: 0.9em;
+      margin-right: 6px;
+    }
+    button:hover {
+      background-color: #005bb5;
+    }
+    select {
+      padding: 4px 6px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      font-size: 0.9em;
+      margin-right: 6px;
+    }
+    .disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    /* ---------- WebSocket & Chat ---------- */
+    #connStatus {
+      font-weight: bold;
+      color: #0066cc;
+    }
+    #chatContainer {
       margin-top: 20px;
+      border: 1px solid #ccc;
+      background: #fff;
+      border-radius: 6px;
+      padding: 10px;
+      max-width: 800px;
+    }
+    #chatWindow {
+      height: 150px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 8px;
+      background: #fefefe;
+      margin-bottom: 8px;
+      border-radius: 4px;
+    }
+    #chatInput {
+      width: calc(100% - 100px);
+      padding: 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    #sendChatBtn {
+      background-color: #28a745;
+    }
+    #sendChatBtn:hover {
+      background-color: #218838;
+    }
+    /* ---------- Recording Controls ---------- */
+    #recordControls {
+      margin-top: 30px;
+      max-width: 800px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 10px;
+    }
+    #recordControls button {
+      margin-right: 10px;
+    }
+    #recTimer {
+      font-weight: bold;
+      margin-left: 10px;
+    }
+    #waveformCanvas {
+      display: block;
+      margin-top: 10px;
+      border: 1px solid #666;
+      background: #222;
+      width: 100%;
+      height: 200px;
+    }
+    /* ---------- Remotes List ---------- */
+    #remotesContainer {
+      margin-top: 30px;
+      max-width: 1000px;
     }
     .remote-entry {
       background: #fff;
       border: 1px solid #ccc;
       border-radius: 6px;
-      padding: 10px;
-      margin-bottom: 15px;
+      padding: 12px;
+      margin-bottom: 20px;
+    }
+    .remote-header {
       display: flex;
       align-items: center;
-    }
-    .remote-info {
-      flex: 1;
+      justify-content: space-between;
+      margin-bottom: 10px;
     }
     .remote-name {
-      font-size: 1.1em;
-      margin-bottom: 5px;
+      font-size: 1.2em;
+      font-weight: bold;
     }
-    .remote-buttons button {
+    .remote-status {
+      font-size: 0.9em;
+      color: #0066cc;
+      margin-left: 10px;
+    }
+    .remote-controls {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .remote-controls > * {
       margin-right: 8px;
-      padding: 6px 10px;
-      border: none;
-      background-color: #0066cc;
-      color: #fff;
-      border-radius: 4px;
-      cursor: pointer;
+      margin-top: 4px;
     }
-    .remote-buttons button:hover {
-      background-color: #005bb5;
+    .remote-meter,
+    .bitrate-graph,
+    .jitter-graph {
+      display: inline-block;
+      vertical-align: top;
+      margin-top: 10px;
+      margin-right: 20px;
     }
-    .remote-meter {
-      margin-left: 20px;
-    }
-    .remote-meter canvas {
+    .remote-meter canvas,
+    .bitrate-graph canvas,
+    .jitter-graph canvas {
       border: 1px solid #aaa;
       background: #222;
+      display: block;
+    }
+    .graph-label {
+      font-size: 0.8em;
+      text-align: center;
+      margin-top: 4px;
+      color: #444;
     }
   </style>
 </head>
 <body>
   <h1>Studio Control Interface</h1>
-
   <div>
     WebSocket status: <span id="connStatus">not connected</span>
   </div>
 
-  <!-- Chat panel, bitrate selector, etc. could go here -->
+  <!-- ---------- Chat Section ---------- -->
+  <div id="chatContainer">
+    <h2>Studio Chat</h2>
+    <div id="chatWindow"></div>
+    <input id="chatInput" type="text" placeholder="Type a message..." />
+    <button id="sendChatBtn">Send</button>
+  </div>
 
+  <!-- ---------- Recording Controls ---------- -->
+  <div id="recordControls">
+    <h2>Recording Controls</h2>
+    <button id="recordBtn">Start Recording</button>
+    <button id="stopRecordBtn" disabled>Stop Recording</button>
+    <span id="recTimer">00:00</span>
+    <canvas id="waveformCanvas"></canvas>
+  </div>
+
+  <!-- ---------- Connected Remotes ---------- -->
   <h2>Connected Remotes</h2>
   <div id="remotesContainer">
-    <!--
-      Each remote connection will insert a div.remote-entry like this:
+    <!-- Remote entries will be injected here -->
+  </div>
 
-      <div class="remote-entry" id="remote-<peerId>">
-        <div class="remote-info">
-          <div class="remote-name">Alice</div>
-          <div class="remote-status">Connected</div>
+  <!-- ---------- Remote Entry Template ---------- -->
+  <template id="remoteEntryTemplate">
+    <div class="remote-entry">
+      <div class="remote-header">
+        <div>
+          <span class="remote-name">Remote Name</span>
+          <span class="remote-status">(status)</span>
         </div>
-        <div class="remote-buttons">
+        <div>
           <button class="muteRemoteBtn">Mute</button>
           <button class="kickRemoteBtn">Kick</button>
         </div>
-        <div class="remote-meter">
-          <canvas width="200" height="50"></canvas>
-        </div>
       </div>
-    -->
-  </div>
-
-  <!-- Template (hidden) that JS clones for each remote -->
-  <template id="remoteEntryTemplate">
-    <div class="remote-entry">
-      <div class="remote-info">
-        <div class="remote-name"></div>
-        <div class="remote-status">Connecting...</div>
-      </div>
-      <div class="remote-buttons">
-        <button class="muteRemoteBtn">Mute</button>
-        <button class="kickRemoteBtn">Kick</button>
+      <div class="remote-controls">
+        <label>
+          Mode:
+          <select class="modeSelect">
+            <option value="music">Music (Stereo)</option>
+            <option value="speech">Speech (Mono)</option>
+          </select>
+        </label>
+        <label>
+          Bitrate:
+          <select class="bitrateSelect">
+            <option value="320000">320 kbps</option>
+            <option value="192000">192 kbps</option>
+            <option value="128000">128 kbps</option>
+            <option value="64000">64 kbps</option>
+            <option value="32000">32 kbps</option>
+          </select>
+        </label>
       </div>
       <div class="remote-meter">
         <canvas width="200" height="50"></canvas>
+        <div class="graph-label">PPM Meter</div>
+      </div>
+      <div class="bitrate-graph">
+        <canvas width="200" height="50"></canvas>
+        <div class="graph-label">Bitrate (kbps)</div>
+      </div>
+      <div class="jitter-graph">
+        <canvas width="200" height="50"></canvas>
+        <div class="graph-label">Jitter (ms)</div>
       </div>
     </div>
   </template>
 
+  <!-- ---------- Include Studio JS ---------- -->
   <script src="studio.js"></script>
 </body>
 </html>
