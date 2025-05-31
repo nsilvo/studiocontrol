@@ -1,13 +1,15 @@
 /**
  * remote.js
  *
- * Front-end logic for a remote contributor (v3).
- * - Handles “kicked” message from server, alerting the user and closing.
- * - Everything else is same as before (waiting → start-call → WebRTC).
+ * Front-end logic for a remote contributor (v4).
+ * - Handles two-way audio (remote → studio & studio → remote).
+ * - “Mute Myself” now mutes remote → studio and notifies studio.
+ * - Listens for “mute-update” from studio to show “Muted by Studio.”
+ * - Plays incoming studio audio in a hidden <audio> element.
  */
 
 (() => {
-  // ICE servers configuration
+  // ICE servers configuration (TURN/STUN)
   const ICE_CONFIG = {
     iceServers: [
       {
@@ -18,14 +20,13 @@
     ],
   };
 
-  // Globals
   let ws = null;
   let pc = null;
   let localStream = null;
   let audioSender = null;
   let localID = null;
   let displayName = '';
-  let isMuted = false;
+  let isMuted = false; // remote's own mute state
   let isTone = false;
   let toneOscillator = null;
   let toneContext = null;
@@ -40,6 +41,7 @@
   const connStatusSpan = document.getElementById('connStatus');
   const meterCanvas = document.getElementById('meter-canvas');
   const meterContext = meterCanvas.getContext('2d');
+  const studioMuteStatus = document.getElementById('studioMuteStatus');
   const chatWindowEl = document.getElementById('chatWindow');
   const chatInputEl = document.getElementById('chatInput');
   const sendChatBtn = document.getElementById('sendChatBtn');
@@ -120,8 +122,13 @@
         connStatusSpan.textContent = 'studio disconnected';
         break;
 
+      case 'mute-update':
+        // { type:'mute-update', from:'studio', muted:true|false }
+        handleMuteUpdate(msg.muted);
+        break;
+
       case 'kicked':
-        // { type: 'kicked', reason: '...' }
+        // { type:'kicked', reason:'...' }
         alert(`You have been disconnected by the studio:\n\n${msg.reason}`);
         ws.close();
         connStatusSpan.textContent = 'kicked';
@@ -158,12 +165,27 @@
     // Create RTCPeerConnection
     pc = new RTCPeerConnection(ICE_CONFIG);
 
-    // Add audio track & keep sender reference
+    // Add audio track (remote → studio)
     const track = localStream.getAudioTracks()[0];
     audioSender = pc.addTrack(track, localStream);
 
     // Set up local audio meter (mic)
     setupLocalMeter(localStream);
+
+    // Handle incoming tracks (studio → remote)
+    pc.ontrack = (evt) => {
+      const [incomingStream] = evt.streams;
+      // Create a hidden <audio> for studio → remote if needed
+      let audioStudioElem = document.getElementById('audio-studio');
+      if (!audioStudioElem) {
+        audioStudioElem = document.createElement('audio');
+        audioStudioElem.id = 'audio-studio';
+        audioStudioElem.autoplay = true;
+        audioStudioElem.controls = false;
+        document.body.appendChild(audioStudioElem);
+      }
+      audioStudioElem.srcObject = incomingStream;
+    };
 
     // ICE candidates → send to studio
     pc.onicecandidate = (evt) => {
@@ -232,6 +254,16 @@
   }
 
   /////////////////////////////////////////////////////
+  // Handle incoming mute-update (from studio)
+  /////////////////////////////////////////////////////
+  function handleMuteUpdate(muted) {
+    // Show mute status from studio
+    studioMuteStatus.textContent = muted
+      ? '🔇 You have been muted by the studio.'
+      : '🎙️ Studio is unmuted.';
+  }
+
+  /////////////////////////////////////////////////////
   // Set up stereo meter for local audio (mic or tone)
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
@@ -292,20 +324,25 @@
   }
 
   /////////////////////////////////////////////////////
-  // Toggle mute/unmute
+  // Toggle mute/unmute (remote → studio)
   /////////////////////////////////////////////////////
   function toggleMute() {
     if (!audioSender) return;
     isMuted = !isMuted;
     const track = isMuted ? null : localStream.getAudioTracks()[0];
     audioSender.replaceTrack(track);
-    muteSelfBtn.textContent = isMuted ? 'Unmute' : 'Mute';
-    if (isMuted) {
-      analyserL.disconnect();
-      analyserR.disconnect();
-    } else {
-      setupLocalMeter(localStream);
-    }
+
+    // Send mute-update to studio
+    ws.send(
+      JSON.stringify({
+        type: 'mute-update',
+        from: localID,
+        target: 'studio',
+        muted: isMuted,
+      })
+    );
+
+    muteSelfBtn.textContent = isMuted ? 'Unmute Myself' : 'Mute Myself';
   }
 
   /////////////////////////////////////////////////////

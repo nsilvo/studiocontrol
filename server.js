@@ -2,7 +2,7 @@
  * server.js
  *
  * Node.js signaling server for WebRTC remote audio contributions,
- * with added “kick-remote” support so the studio can forcibly disconnect a remote.
+ * now supporting two-way audio (studio ↔ remote) and "mute-update" forwarding.
  */
 
 const fs = require('fs');
@@ -310,6 +310,35 @@ wss.on('connection', (ws, req) => {
         }
         break;
 
+      case 'mute-update':
+        /**
+         * { type: 'mute-update', from: <“studio”|remoteID>, target: <“studio”|remoteID>, muted: true|false }
+         *
+         * Forward to the specified target if connected.
+         */
+        try {
+          const { from, target, muted } = msg;
+          if (!from || !target || typeof muted !== 'boolean') {
+            throw new Error('Missing fields in mute-update');
+          }
+
+          if (target === 'studio') {
+            // Forward to studio
+            if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
+              sendToStudio({ type: 'mute-update', from, muted });
+            }
+          } else {
+            // Forward to specific remote
+            const entry = remotes.get(target);
+            if (entry && entry.socket.readyState === entry.socket.OPEN) {
+              sendToRemote(target, { type: 'mute-update', from, muted });
+            }
+          }
+        } catch (err) {
+          logger.error(`Error handling mute-update: ${err.message}`);
+        }
+        break;
+
       case 'kick-remote':
         /**
          * { type: 'kick-remote', from: 'studio', target: '<remoteID>' }
@@ -328,7 +357,7 @@ wss.on('connection', (ws, req) => {
             reason: 'You have been disconnected by the studio.',
           });
 
-          // Close the remote's socket after a brief delay
+          // Close the remote's socket after a brief delay (so they receive "kicked" first)
           setTimeout(() => {
             if (entry.socket.readyState === entry.socket.OPEN) {
               entry.socket.close();
@@ -352,7 +381,9 @@ wss.on('connection', (ws, req) => {
          */
         try {
           const { from, name, message, target } = msg;
-          if (!from || !name || !message || !target) throw new Error('Missing fields in chat');
+          if (!from || !name || !message || !target) {
+            throw new Error('Missing fields in chat');
+          }
 
           const sanitized = String(message)
             .replace(/</g, '&lt;')
@@ -403,7 +434,7 @@ wss.on('connection', (ws, req) => {
       const rname = remotes.get(rid)?.name;
       remotes.delete(rid);
       logger.info(`Remote removed (id=${rid}, name=${rname})`);
-      // Notify studio that remote disconnected
+
       if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
         sendToStudio({ type: 'remote-disconnected', id: rid });
       }
