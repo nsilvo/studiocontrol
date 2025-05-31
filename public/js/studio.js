@@ -2,17 +2,10 @@
  * public/js/studio.js
  *
  * - Manages WebSocket signaling and RTCPeerConnections for multiple remotes.
- * - For each connected remote:
- *     • Creates a remote‐entry card in #remotesContainer.
- *     • Sets up an RTCPeerConnection that receives the remote’s audio
- *       and also sends “studio audio” (the mix of all remotes) back.
- *     • Provides “Call”, “Mute”, “Kick” buttons, Mode and Bitrate controls.
- *     • Draws a per‐remote PPM meter, placeholder jitter/bitrate graphs, and a chat window.
- * - Implements multi-track recording:
- *     • Creates a single “master mixer” AudioContext that mixes all remote streams.
- *     • Sends that mixed stream as an outgoing track to each remote’s PC.
- *     • Records each remote’s audio individually, plus the mixed “studio feed”,
- *       and uploads them via POST /upload when recording stops.
+ * - Global “Studio Chat” at top (appendGlobalChatMessage, send chat→server).
+ * - Per‐remote cards for call/mute/kick/mode/bitrate, per‐remote PPM meters, stats, chat.
+ * - Sends mixed “studio audio” back to each remote.
+ * - Multi‐track recording: records each remote’s audio + a mixed “studio feed,” uploads via /upload.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -38,37 +31,68 @@ document.addEventListener('DOMContentLoaded', () => {
   const remoteRecorders = new Map();
 
   // ===== GLOBAL STUDIO MIXER SETUP =====
-  // We use one AudioContext to mix all inbound remote streams.
+  // One AudioContext to mix all incoming remote streams
   let studioAudioContext = null;
   let masterDestination = null; // MediaStreamDestination
-  // We will add each remote's incoming stream to this mixer.
 
-  // DOM references:
-  const connStatusSpan   = document.getElementById('connStatus');
-  const remotesContainer = document.getElementById('remotesContainer');
+  // ===== DOM REFERENCES =====
+  const connStatusSpan    = document.getElementById('connStatus');
+  const remotesContainer  = document.getElementById('remotesContainer');
   const remoteEntryTemplate = document.getElementById('remoteEntryTemplate');
 
-  // Recording controls:
-  const recordBtn      = document.getElementById('recordBtn');
-  const stopRecordBtn  = document.getElementById('stopRecordBtn');
-  const recorderTimerSpan = document.getElementById('recTimer');
-  const waveformCanvas = document.getElementById('waveformCanvas');
+  // Global Chat Elements
+  const chatWindowAll     = document.getElementById('chatWindow');
+  const chatInputAll      = document.getElementById('chatInput');
+  const chatSendBtnAll    = document.getElementById('sendChatBtn');
 
-  let studioRecorder     = null;
-  let recordingStartTime = null;
+  // Recording Controls
+  const recordBtn         = document.getElementById('recordBtn');
+  const stopRecordBtn     = document.getElementById('stopRecordBtn');
+  const recorderTimerSpan = document.getElementById('recTimer');
+  const waveformCanvas    = document.getElementById('waveformCanvas');
+
+  let studioRecorder      = null;
+  let recordingStartTime  = null;
   let recorderTimerInterval = null;
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 1) INITIALIZE WEBSOCKET
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 1) GLOBAL CHAT HELPERS
+  // ===================================================================
+  function appendGlobalChatMessage(sender, text) {
+    const div = document.createElement('div');
+    div.textContent = `[${sender}]: ${text}`;
+    chatWindowAll.appendChild(div);
+    chatWindowAll.scrollTop = chatWindowAll.scrollHeight;
+  }
+
+  chatSendBtnAll.onclick = () => {
+    const text = chatInputAll.value.trim();
+    if (!text) return;
+    // Send to server; the server should broadcast to all studios/remotes
+    ws.send(
+      JSON.stringify({
+        type: 'chat',
+        fromRole: 'studio',
+        fromId: window.STUDIO_ID || 'Studio',
+        text,
+        target: 'all'
+      })
+    );
+    appendGlobalChatMessage('You', text);
+    chatInputAll.value = '';
+  };
+
+  // ===================================================================
+  // 2) INITIALIZE WEBSOCKET
+  // ===================================================================
   function initWebSocket() {
     ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
       console.log('[studio] WS opened');
       connStatusSpan.textContent = 'WS connected';
-      // Join as studio
-      ws.send(JSON.stringify({ type: 'join', role: 'studio' }));
+      // Join as studio (include the ID so server can tag messages)
+      ws.send(JSON.stringify({ type: 'join', role: 'studio', studioId: window.STUDIO_ID || 'Studio' }));
     };
 
     ws.onmessage = (evt) => {
@@ -117,9 +141,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       case 'candidate':
         // { type:'candidate', from: remoteId, candidate }
-        if (peers.has(msg.from)) {
+        if (peers.has(msg.from) && peers.get(msg.from).pc.remoteDescription) {
           handleCandidate(msg.from, msg.candidate);
         }
+        // else: ignore silently until PC exists and remoteDescription is set
         break;
 
       case 'remote-disconnected':
@@ -128,14 +153,20 @@ document.addEventListener('DOMContentLoaded', () => {
         teardownPeer(msg.id);
         break;
 
+      case 'chat':
+        // { type:'chat', fromRole:'remote'|'studio', fromId, text }
+        appendGlobalChatMessage(msg.fromId || 'Anonymous', msg.text);
+        break;
+
       default:
+        // Unknown types are ignored
         console.warn('[studio] Unknown message:', msg.type);
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 2) SET UP A NEW REMOTE ENTRY
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 3) SET UP A NEW REMOTE ENTRY
+  // ===================================================================
   function setupNewRemote(remoteId, remoteName) {
     // 1) Clone template
     const clone = remoteEntryTemplate.content.cloneNode(true);
@@ -181,76 +212,66 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     modeSelect.onchange = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'mode-update',
-          target: remoteId,
-          mode: modeSelect.value
-        })
-      );
+      ws.send(JSON.stringify({
+        type: 'mode-update',
+        target: remoteId,
+        mode: modeSelect.value
+      }));
     };
 
     bitrateInput.onchange = () => {
       const br = parseInt(bitrateInput.value, 10);
-      ws.send(
-        JSON.stringify({
-          type: 'bitrate-update',
-          target: remoteId,
-          bitrate: br
-        })
-      );
+      ws.send(JSON.stringify({
+        type: 'bitrate-update',
+        target: remoteId,
+        bitrate: br
+      }));
     };
 
     chatSendBtn.onclick = () => {
       const text = chatInput.value.trim();
       if (!text) return;
-      ws.send(
-        JSON.stringify({
-          type: 'chat',
-          fromRole: 'studio',
-          fromId: 'studio',
-          target: 'remote',
-          targetId: remoteId,
-          text
-        })
-      );
-      appendChatMessage(chatWindow, 'You', text);
+      ws.send(JSON.stringify({
+        type: 'chat',
+        fromRole: 'studio',
+        fromId: window.STUDIO_ID || 'Studio',
+        target: 'remote',
+        targetId: remoteId,
+        text
+      }));
+      appendPerRemoteChatMessage(chatWindow, 'You', text);
       chatInput.value = '';
     };
 
-    // 3) Set up PeerConnection and store placeholders
+    // 3) Create PeerConnection and store placeholders
     const pc = new RTCPeerConnection(ICE_CONFIG);
 
-    // When we get an incoming track from this remote, hook it up
+    // 3a) When we get a track from this remote, wire it into our mixer + meters
     pc.ontrack = (evt) => {
       const [remoteStream] = evt.streams;
       statusEl.textContent = 'Connected';
 
-      // If we don’t yet have a master mixer context, create it
+      // If no master mixer exists yet, create it
       if (!studioAudioContext) {
-        studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 48000
-        });
+        studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         masterDestination = studioAudioContext.createMediaStreamDestination();
       }
 
-      // Mix this remote’s stream into the masterDestination
+      // Mix this remote’s audio into the masterDestination
       const srcNode = studioAudioContext.createMediaStreamSource(remoteStream);
       srcNode.connect(masterDestination);
 
-      // Save the remote stream for recording
+      // Save the stream for recording
       mediaStreams.set(remoteId, remoteStream);
 
-      // Prepare per‐remote PPM meter and stats canvases:
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 48000
-      });
-      const meterSrc = audioCtx.createMediaStreamSource(remoteStream);
-      const splitter = audioCtx.createChannelSplitter(2);
+      // Set up per‐remote metering
+      const meterAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      const meterSrc = meterAudioCtx.createMediaStreamSource(remoteStream);
+      const splitter = meterAudioCtx.createChannelSplitter(2);
 
-      const analyserL = audioCtx.createAnalyser();
+      const analyserL = meterAudioCtx.createAnalyser();
       analyserL.fftSize = 256;
-      const analyserR = audioCtx.createAnalyser();
+      const analyserR = meterAudioCtx.createAnalyser();
       analyserR.fftSize = 256;
 
       splitter.connect(analyserL, 0);
@@ -263,8 +284,7 @@ document.addEventListener('DOMContentLoaded', () => {
         analyserL.getByteFrequencyData(dataL);
         analyserR.getByteFrequencyData(dataR);
 
-        let sumL = 0,
-          sumR = 0;
+        let sumL = 0, sumR = 0;
         for (let i = 0; i < bufLen; i++) {
           sumL += dataL[i] * dataL[i];
           sumR += dataR[i] * dataR[i];
@@ -283,27 +303,14 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.fillStyle = '#2196f3';
         ctx.fillRect(0, meterCanvas.height / 2 + 2, barR, meterCanvas.height / 2 - 2);
 
-        dataL.fill(0);
-        dataR.fill(0);
-
-        dataL.forEach(() => {});
-        dataR.forEach(() => {});
-
-        dataL.fill(0);
-        dataR.fill(0);
-
-        dataL.forEach(() => {});
-        dataR.forEach(() => {});
-
         const rafId = requestAnimationFrame(drawMeter);
         peers.get(remoteId).rafId = rafId;
       }
 
-      // Set up the audio context for metering
       meterSrc.connect(splitter);
       drawMeter();
 
-      // Placeholder for jitter & bitrate graphs (just clear them each frame)
+      // Placeholder “jitter” & “bitrate” graphs (clear each frame)
       const jitterCtx  = jitterCanvas.getContext('2d');
       const bitrateCtx = bitrateCanvas.getContext('2d');
       function drawStats() {
@@ -313,29 +320,29 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       drawStats();
 
-      // Finally, store details in peers map
+      // Update stored peer data
       const peerData = peers.get(remoteId);
       if (peerData) {
-        peerData.audioContext = audioCtx;
-        peerData.analyserL = analyserL;
-        peerData.analyserR = analyserR;
-        peerData.mediaStream = remoteStream;
+        peerData.audioContext = meterAudioCtx;
+        peerData.analyserL    = analyserL;
+        peerData.analyserR    = analyserR;
+        peerData.mediaStream  = remoteStream;
       }
     };
 
+    // 3b) ICE candidate handler
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        ws.send(
-          JSON.stringify({
-            type: 'candidate',
-            from: 'studio',
-            target: remoteId,
-            candidate: e.candidate
-          })
-        );
+        ws.send(JSON.stringify({
+          type: 'candidate',
+          from: 'studio',
+          target: remoteId,
+          candidate: e.candidate
+        }));
       }
     };
 
+    // 3c) Connection state changes
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       statusEl.textContent = `WebRTC: ${state}`;
@@ -344,23 +351,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     };
 
-    // 4) Immediately add the “studio audio” outgoing track (mixed remote audio)
-    //    If the masterDestination doesn't exist yet, we’ll create it when the first
-    //    remote publishes. For now, we can create an AudioContext/destination so that
-    //    once the remote track arrives, it gets mixed automatically.
+    // 4) Immediately add the “studio audio” track (silence until mixed)
     if (!studioAudioContext) {
-      studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 48000
-      });
+      studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       masterDestination = studioAudioContext.createMediaStreamDestination();
     }
-    // Add one track from masterDestination to this new pc:
-    const [studioTrack] = masterDestination.stream.getAudioTracks();
-    if (studioTrack) {
-      pc.addTrack(studioTrack, masterDestination.stream);
+    const studioTracks = masterDestination.stream.getAudioTracks();
+    if (studioTracks.length) {
+      pc.addTrack(studioTracks[0], masterDestination.stream);
     }
 
-    // 5) Store the initial peer data:
+    // 5) Store peer data in the map
     peers.set(remoteId, {
       pc,
       entryEl,
@@ -372,9 +373,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 3) HANDLE INCOMING OFFER FROM REMOTE
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 4) HANDLE INCOMING OFFER FROM REMOTE
+  // ===================================================================
   async function handleOffer(remoteId, sdp) {
     const data = peers.get(remoteId);
     if (!data) return;
@@ -383,26 +384,24 @@ document.addEventListener('DOMContentLoaded', () => {
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      ws.send(
-        JSON.stringify({
-          type: 'answer',
-          from: 'studio',
-          target: remoteId,
-          sdp: pc.localDescription.sdp
-        })
-      );
+      ws.send(JSON.stringify({
+        type: 'answer',
+        from: 'studio',
+        target: remoteId,
+        sdp: pc.localDescription.sdp
+      }));
     } catch (e) {
       console.error(`[studio] handleOffer error for ${remoteId}:`, e);
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 4) HANDLE INCOMING ICE CANDIDATE
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 5) HANDLE INCOMING ICE CANDIDATE
+  // ===================================================================
   async function handleCandidate(remoteId, candidate) {
     const data = peers.get(remoteId);
     if (!data || !data.pc.remoteDescription) {
-      console.warn(`[studio] No PC or remoteDesc for ${remoteId} yet.`);
+      // If no PC or remoteDescription yet, just skip
       return;
     }
     try {
@@ -412,9 +411,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 5) TEARDOWN A REMOTE
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 6) TEARDOWN A REMOTE
+  // ===================================================================
   function teardownPeer(remoteId) {
     const data = peers.get(remoteId);
     if (!data) return;
@@ -429,9 +428,9 @@ document.addEventListener('DOMContentLoaded', () => {
     mediaStreams.delete(remoteId);
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 6) RECORDING CONTROLS (Studio)
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 7) RECORDING CONTROLS
+  // ===================================================================
   recordBtn.onclick = () => startRecording();
   stopRecordBtn.onclick = () => stopRecording();
 
@@ -444,15 +443,13 @@ document.addEventListener('DOMContentLoaded', () => {
     recordBtn.disabled = true;
     stopRecordBtn.disabled = false;
 
-    // Create a fresh AudioContext/destination if not already:
+    // Create master mixer if not yet created
     if (!studioAudioContext) {
-      studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 48000
-      });
+      studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       masterDestination = studioAudioContext.createMediaStreamDestination();
     }
 
-    // Attach all remote streams to the mixer
+    // Attach each remote’s incoming stream to the mixer
     mediaStreams.forEach((stream, remoteId) => {
       const src = studioAudioContext.createMediaStreamSource(stream);
       src.connect(masterDestination);
@@ -522,8 +519,18 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch((err) => console.error('[studio] Upload error:', err));
   }
 
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
+  // 8) PER-REMOTE CHAT APPENDER
+  // ===================================================================
+  function appendPerRemoteChatMessage(container, sender, text) {
+    const div = document.createElement('div');
+    div.textContent = `[${sender}]: ${text}`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // ===================================================================
   // INITIALIZE EVERYTHING
-  // ────────────────────────────────────────────────────────────────────────
+  // ===================================================================
   initWebSocket();
 });
