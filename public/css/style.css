@@ -20,17 +20,17 @@
   --card-radius: 8px;
   --transition: 0.2s ease-in-out;
 
-  --meter-width: 20px;
-  --meter-height: 150px;
+  /* Dimensions for horizontal VU meters */
+  --h-vu-width: 300px;
+  --h-vu-height: 20px;
 }
 
-/* Reset */
+/* Basic reset */
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
-
 html, body {
   height: 100%;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -55,7 +55,7 @@ html, body {
   padding: 6px 12px;
   cursor: pointer;
   transition: background-color var(--transition);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 .btn:hover:not(:disabled) {
   background-color: var(--button-hover);
@@ -151,16 +151,6 @@ select:focus {
   border-color: var(--accent);
 }
 
-textarea {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-  padding: 8px;
-  color: var(--text-primary);
-  font-size: 0.9rem;
-  resize: vertical;
-}
-
 label {
   font-size: 0.85rem;
   color: var(--text-secondary);
@@ -168,34 +158,33 @@ label {
 }
 
 /* ==========================================================================
-   VU METER Styles (Vertical, Segmented)
+   Horizontal VU METER Styles
    ========================================================================== */
 
-.vu-meter-vertical {
-  width: var(--meter-width);
-  height: var(--meter-height);
+.vu-meter-horizontal {
+  width: var(--h-vu-width);
+  height: var(--h-vu-height);
   background-color: var(--meter-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--card-radius);
   position: relative;
-  margin: 0 8px;
+  margin: 10px;
 }
 
-.vu-meter-vertical canvas {
+.vu-meter-horizontal canvas {
   position: absolute;
   top: 0;
   left: 0;
 }
 
-/* Legend on right side of meter */
-.vu-legend {
+/* Legend below the horizontal meter */
+.vu-legend-horizontal {
   display: flex;
-  flex-direction: column;
   justify-content: space-between;
-  height: var(--meter-height);
+  width: var(--h-vu-width);
   font-size: 0.65rem;
   color: var(--text-secondary);
-  margin-left: 4px;
+  margin-top: 4px;
 }
 
 /* ==========================================================================
@@ -211,7 +200,6 @@ label {
   margin-bottom: 30px;
 }
 
-/* Each remote card */
 .remote-entry {
   width: 250px;
   min-height: 150px;
@@ -354,7 +342,7 @@ label {
 }
 
 /* ==========================================================================
-   Hide all <audio> (already hidden by .audio-hidden)
+   Hide all <audio> elements
    ========================================================================== */
 
 .audio-hidden {
