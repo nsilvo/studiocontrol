@@ -1,14 +1,10 @@
 /**
  * public/js/studio.js
  *
- * - Captures studio mic → drives #studioVuCanvas vertical VU meter.
- * - For each remote:
- *     • Creates a compact 250×150 card (with a vertical VU meter, Call, Mute/Unmute, Mode, Bitrate, Toggle Stats).
- *     • Hides per‐remote chat entirely.
- * - All remote cards appear in #remotesContainer (a flex‐wrapped row).
- * - “VU Meters” row at top shows #studioVuCanvas + one .remoteVuCanvas per remote.
- * - Single global chat → broadcast to all remotes.
- * - Recording controls at bottom (unchanged).
+ * - As soon as the studio page loads, we immediately request mic access
+ *   so the VU meter can display real-time levels even before remotes connect.
+ * - After mic initialization, we proceed to open the WebSocket, handle
+ *   incoming remotes, and so on.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -48,48 +44,58 @@ document.addEventListener('DOMContentLoaded', () => {
   const vuWidth = studioVuCanvas.width;
   const vuHeight = studioVuCanvas.height;
 
+  /**
+   * Immediately prompt for microphone access and set up a running VU meter.
+   * Called as soon as DOMContentLoaded fires—before we even open the WebSocket.
+   */
   async function initStudioMic() {
     try {
       studioMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // Create analyser for studio mic
+      // Create an AudioContext & AnalyserNode for the studio mic.
       studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       const source = studioAudioContext.createMediaStreamSource(studioMicStream);
       studioAnalyser = studioAudioContext.createAnalyser();
       studioAnalyser.fftSize = 256;
       source.connect(studioAnalyser);
       studioRMSData = new Uint8Array(studioAnalyser.frequencyBinCount);
+      // Start drawing the VU meter right away
       drawStudioVuMeter();
       console.log('[studio] Studio mic & VU meter initialized');
     } catch (err) {
       console.error('[studio] Error accessing microphone:', err);
-      alert('Microphone access is required for the studio VU meter.');
+      alert('Microphone access is required to see the studio VU meter.');
     }
   }
 
+  /**
+   * Continuously reads from studioAnalyser and draws 10 segmented bars,
+   * coloring them green / yellow / red based on level. Runs as soon as
+   * initStudioMic() succeeds—no WebSocket needed to begin.
+   */
   function drawStudioVuMeter() {
     if (!studioAnalyser) return;
     studioAnalyser.getByteFrequencyData(studioRMSData);
-    // Compute RMS of entire spectrum
+    // Compute RMS across the entire frequency bin
     let sum = 0;
     for (let i = 0; i < studioRMSData.length; i++) {
       sum += studioRMSData[i] * studioRMSData[i];
     }
-    const rms = Math.sqrt(sum / studioRMSData.length) / 255; // 0..1
+    const rms = Math.sqrt(sum / studioRMSData.length) / 255; // [0..1]
 
     // Clear canvas
     studioVuCtx.clearRect(0, 0, vuWidth, vuHeight);
 
-    // Draw vertical segmented meter (10 segments)
+    // Draw 10 segments (bottom-to-top). Fill only those >= RMS.
     const segments = 10;
     const segHeight = vuHeight / segments;
     for (let i = 0; i < segments; i++) {
-      const threshold = (i + 1) / segments; // 0.1, 0.2, ..., 1.0
+      const threshold = (i + 1) / segments; // 0.1, 0.2, …, 1.0
       const y = vuHeight - (i + 1) * segHeight;
       if (rms >= threshold) {
-        studioVuCtx.fillStyle = varColor(threshold);
+        studioVuCtx.fillStyle = pickColorForLevel(threshold);
         studioVuCtx.fillRect(0, y, vuWidth, segHeight - 2);
       } else {
-        studioVuCtx.strokeStyle = var(--border-color);
+        studioVuCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border-color');
         studioVuCtx.strokeRect(0, y, vuWidth, segHeight - 2);
       }
     }
@@ -97,15 +103,22 @@ document.addEventListener('DOMContentLoaded', () => {
     studioRafId = requestAnimationFrame(drawStudioVuMeter);
   }
 
-  // Utility: pick green / yellow / red based on level
-  function varColor(level) {
-    if (level < 0.6) return getComputedStyle(document.documentElement).getPropertyValue('--meter-green');
-    if (level < 0.8) return getComputedStyle(document.documentElement).getPropertyValue('--meter-yellow');
+  /**
+   * Helper to pick green / yellow / red based on a normalized [0..1] value
+   * (passed as `level`). Colors come from CSS variables.
+   */
+  function pickColorForLevel(level) {
+    if (level < 0.6) {
+      return getComputedStyle(document.documentElement).getPropertyValue('--meter-green');
+    }
+    if (level < 0.8) {
+      return getComputedStyle(document.documentElement).getPropertyValue('--meter-yellow');
+    }
     return getComputedStyle(document.documentElement).getPropertyValue('--meter-red');
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // 3) GLOBAL CHAT
+  // 3) GLOBAL CHAT (Broadcast-only)
   // ────────────────────────────────────────────────────────────────────────
   const chatWindowAll = document.getElementById('chatWindow');
   const chatInputAll = document.getElementById('chatInput');
@@ -121,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
   chatSendBtnAll.onclick = () => {
     const text = chatInputAll.value.trim();
     if (!text) return;
-    // Send to server; server will broadcast to all remotes
+    // Broadcast to ALL remotes
     ws.send(
       JSON.stringify({
         type: 'chat',
@@ -163,15 +176,12 @@ document.addEventListener('DOMContentLoaded', () => {
       console.warn('[studio] WS closed. Reconnecting in 5s…');
       connStatusSpan.textContent = 'Disconnected. Reconnecting…';
       setTimeout(initWebSocket, 5000);
-      // Teardown all peers
-      for (let pid of peers.keys()) {
-        teardownPeer(pid);
-      }
+
+      // Tear down all peers + remove remote VU meters
+      peers.forEach((_, pid) => teardownPeer(pid));
       peers.clear();
       mediaStreams.clear();
-      // Remove per‐remote VU meter cards
-      const vuContainer = document.getElementById('vuMetersContainer');
-      vuContainer.querySelectorAll('.remote-meter-card').forEach((el) => el.remove());
+      document.querySelectorAll('.remote-meter-card').forEach((el) => el.remove());
     };
 
     ws.onerror = (err) => {
@@ -213,7 +223,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 5) SET UP A NEW REMOTE CARD
   // ────────────────────────────────────────────────────────────────────────
   function setupNewRemote(remoteId, remoteName) {
-    // 5a) VU Meter Card for this remote
+    // 5a) Add a vertical VU meter “card” in the top row
     const vuContainer = document.getElementById('vuMetersContainer');
     const remoteVuCard = document.createElement('div');
     remoteVuCard.className = 'vu-meter-vertical card remote-meter-card';
@@ -234,7 +244,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const remoteVuCanvas = remoteVuCard.querySelector('.remoteVuCanvas');
     const remoteVuCtx = remoteVuCanvas.getContext('2d');
 
-    // 5b) Clone the remoteEntryTemplate
+    // 5b) Clone the 250×150 remote‐entry template
     const clone = document.getElementById('remoteEntryTemplate').content.cloneNode(true);
     const entryEl = clone.querySelector('.remote-entry');
     entryEl.id = `remote-${remoteId}`;
@@ -256,17 +266,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     let isMuted = false;
 
-    // 5d) Add studio mic track to this PC so remote hears us
+    // 5d) Add the studio mic track so the remote can hear us
     if (studioMicStream) {
       studioMicStream.getAudioTracks().forEach((t) => pc.addTrack(t, studioMicStream));
     }
 
-    // 5e) ontrack: remote’s audio → drive remote VU meter
+    // 5e) ontrack: remote’s audio → drive the remote’s VU meter
     pc.ontrack = (evt) => {
       const [remoteStream] = evt.streams;
       entryEl.querySelector('.remote-status').textContent = '(connected)';
 
-      // Start per‐remote VU metering once
+      // If we haven’t already created an analyser for this remote, do so now:
       if (!peers.get(remoteId).analyserRec) {
         const meterAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         const meterSrc = meterAudioCtx.createMediaStreamSource(remoteStream);
@@ -281,20 +291,18 @@ document.addEventListener('DOMContentLoaded', () => {
           for (let i = 0; i < rmsDataRec.length; i++) sum += rmsDataRec[i] * rmsDataRec[i];
           const rms = Math.sqrt(sum / rmsDataRec.length) / 255;
 
-          // Clear
           remoteVuCtx.clearRect(0, 0, vuWidth, vuHeight);
-          // Draw segments
           const segments = 10;
           const segHeight = vuHeight / segments;
           for (let i = 0; i < segments; i++) {
             const threshold = (i + 1) / segments;
-            const color = varColor(threshold);
+            const color = pickColorForLevel(threshold);
             const y = vuHeight - (i + 1) * segHeight;
             if (rms >= threshold) {
               remoteVuCtx.fillStyle = color;
               remoteVuCtx.fillRect(0, y, vuWidth, segHeight - 2);
             } else {
-              remoteVuCtx.strokeStyle = '#333';
+              remoteVuCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border-color');
               remoteVuCtx.strokeRect(0, y, vuWidth, segHeight - 2);
             }
           }
@@ -303,7 +311,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         drawRemoteVu();
 
-        // Save analyserRef
         const peerData = peers.get(remoteId);
         peerData.analyserRec = analyserRec;
         peerData.rmsDataRec = rmsDataRec;
@@ -325,7 +332,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     };
 
-    // 5g) connection state → update status
+    // 5g) Connection state changes → teardown if closed/failed
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       if (['disconnected', 'failed', 'closed'].includes(state)) {
@@ -333,7 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     };
 
-    // 5h) Store peer data
+    // 5h) Store data in the map
     peers.set(remoteId, {
       pc,
       entryEl,
@@ -346,14 +353,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 5i) Button Handlers
 
-    // Call (sends “ready-for-offer”)
+    // Call button: send “ready-for-offer”
     callBtn.onclick = () => {
       ws.send(JSON.stringify({ type: 'ready-for-offer', target: remoteId }));
       callBtn.disabled = true;
       entryEl.querySelector('.remote-status').textContent = '(calling…)';
     };
 
-    // Mute / Unmute toggle
+    // Mute/Unmute toggle
     muteBtn.onclick = () => {
       const peerData = peers.get(remoteId);
       if (!peerData) return;
@@ -392,7 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
       );
     };
 
-    // Toggle Stats (show/hide PPM, Jitter, Bitrate)
+    // Toggle Stats: show/hide PPM / Jitter / Bitrate graphs
     toggleStatsBtn.onclick = () => {
       const ppmDiv = entryEl.querySelector('.remote-meter');
       const jitDiv = entryEl.querySelector('.jitter-graph');
@@ -457,7 +464,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (entryEl && document.getElementById('remotesContainer').contains(entryEl)) {
       entryEl.remove();
     }
-    // Remove the VU meter card
+    // Also remove the VU meter “card”
     const vuCard = document.getElementById(`vuCard-${remoteId}`);
     if (vuCard) vuCard.remove();
     peers.delete(remoteId);
@@ -465,7 +472,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // 9) RECORDING CONTROLS (Unchanged)
+  // 9) RECORDING CONTROLS (Unchanged from before)
   // ────────────────────────────────────────────────────────────────────────
   const recordBtn = document.getElementById('recordBtn');
   const stopRecordBtn = document.getElementById('stopRecordBtn');
@@ -552,10 +559,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // 10) INITIALIZATION
+  // 10) INITIALIZATION: Mic first, then WebSocket
   // ────────────────────────────────────────────────────────────────────────
   (async () => {
+    // 10a) Immediately request mic access and start VU meter
     await initStudioMic();
+    // 10b) Then open the WebSocket and handle remotes
     initWebSocket();
   })();
 });
