@@ -54,10 +54,30 @@
   let isLocalRecording = false;
 
   // DOM elements
-  let reporterNameInput, teamAInput, teamBInput, nameSubmitBtn, nameStepDiv, mainUiDiv;
-  let reporterNameDisplay, teamADisplay, teamBDisplay, scoreBoard, goalIndicator;
-  let goalBtn, localRecordBtn, stopLocalRecordBtn, localRecordLinks;
-  let statusSpan, muteBtn, toneBtn, listenStudioBtn, meterCanvas, meterContext, chatWindowEl, chatInputEl, sendChatBtn;
+  let reporterNameInput,
+    teamAInput,
+    teamBInput,
+    nameSubmitBtn,
+    nameStepDiv,
+    mainUiDiv;
+  let reporterNameDisplay,
+    teamADisplay,
+    teamBDisplay,
+    scoreBoard,
+    goalIndicator;
+  let goalBtn,
+    localRecordBtn,
+    stopLocalRecordBtn,
+    localRecordLinks;
+  let statusSpan,
+    muteBtn,
+    toneBtn,
+    listenStudioBtn,
+    meterCanvas,
+    meterContext,
+    chatWindowEl,
+    chatInputEl,
+    sendChatBtn;
   let audioStudioElem;
 
   let analyserL = null;
@@ -109,14 +129,16 @@
       nameStepDiv.classList.add('hidden');
       mainUiDiv.classList.remove('hidden');
 
+      // Initialize UI first (so scoreBoard, reporterNameDisplay, etc. exist)
+      initSportsUI();
+
       // Fill in header displays
-      document.getElementById('reporterNameDisplay').textContent = reporterName;
-      document.getElementById('teamADisplay').textContent = teamAName;
-      document.getElementById('teamBDisplay').textContent = teamBName;
+      reporterNameDisplay.textContent = reporterName;
+      teamADisplay.textContent = teamAName;
+      teamBDisplay.textContent = teamBName;
       updateScoreDisplay();
 
-      // Initialize UI + WebSocket
-      initSportsUI();
+      // Initialize WebSocket
       initWebSocket();
     };
   }
@@ -165,6 +187,7 @@
   // Update the score display (TeamA : TeamB)
   /////////////////////////////////////////////////////
   function updateScoreDisplay() {
+    // By the time this is called, scoreBoard has been initialized
     scoreBoard.textContent = `${scoreA} : ${scoreB}`;
   }
 
@@ -173,8 +196,7 @@
   /////////////////////////////////////////////////////
   function reportGoal() {
     if (goalPending) return; // already waiting for ack
-    // For simplicity, assume goals alternate teams or reporter chooses 
-    // (here we increment Team A; in real use, reporter could choose).
+    // For simplicity, we increment Team A’s score
     scoreA += 1;
     updateScoreDisplay();
 
@@ -353,7 +375,7 @@
         break;
 
       default:
-        // we ignore keepalive and othertypes
+        // we ignore keepalive and other unrecognized types
         if (msg.type !== 'keepalive') {
           console.warn('[sports] Unknown signaling message:', msg.type);
         }
