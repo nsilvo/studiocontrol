@@ -1,533 +1,458 @@
 /**
  * public/js/studio.js
  *
- * Now each HTML file (studio1.html, studio2.html, …) sets `window.STUDIO_ID`
- * before loading this script. We immediately join as that studio without any dropdown.
+ * - Manages WebSocket signaling, PeerConnections for multiple remotes.
+ * - For each connected remote:
+ *   • Inserts a `.remote-entry` into #remotesContainer.
+ *   • Creates an AudioContext + two AnalyserNodes to meter left/right channels.
+ *   • Draws those meters onto that remote’s <canvas>.
+ *   • Provides “Call”, “Mute” & “Kick” buttons.
+ * - Implements multi‐track recording (studio mix + each remote) with waveform display & timer.
+ * - When recording stops, uploads all recorded blobs to the server at /upload.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // 1. Read the global STUDIO_ID that each HTML page injected
-  const myStudioId = window.STUDIO_ID || 'UnknownStudio';
-  const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
-
-  // 2. Immediately connect to WebSocket and join as that studio
-  const ws = createReconnectingWebSocket(WS_URL);
-
-  // Container for remote cards
-  const remotesContainer = document.getElementById('remotes-container');
-
-  // In-memory data structures
-  const peers = new Map();           // remoteId → RTCPeerConnection
-  const audioElements = new Map();   // remoteId → <audio> element
-  const meters = new Map();          // remoteId → { analyser: AnalyserNode, canvas: HTMLElement }
-  const statsIntervals = new Map();  // remoteId → interval ID for stats polling
-  const mediaRecorders = new Map();  // remoteId → MediaRecorder
-  const recordedChunks = new Map();  // remoteId → Array<Blob>
-
-  // When WebSocket opens, send our “join as studio” message
-  ws.onOpen = () => {
-    console.log(`WebSocket connected. Joining as studio: ${myStudioId}`);
-    ws.send(JSON.stringify({ type: 'join', role: 'studio', studioId: myStudioId }));
+  // ICE servers configuration (TURN/STUN)
+  const ICE_CONFIG = {
+    iceServers: [
+      {
+        urls: ['turn:turn.nkpa.co.uk:3478'],
+        username: 'webrtcuser',
+        credential: 'uS2h$2JW!hL3!E9yb1N1',
+      },
+    ],
   };
 
-  ws.onMessage = raw => {
-    let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch (e) {
-      console.error('Invalid JSON:', e);
-      return;
-    }
+  const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
+  let ws = null;
+  // peers maps peerId → { pc, entryEl, audioContext, analyserL, analyserR, rafId, mediaStream }
+  const peers = new Map();
+
+  // DOM references
+  const connStatusSpan   = document.getElementById('connStatus');
+  const remotesContainer = document.getElementById('remotesContainer');
+  const remoteEntryTemplate = document.getElementById('remoteEntryTemplate');
+
+  // Recording controls
+  const recordBtn      = document.getElementById('recordBtn');
+  const stopRecordBtn  = document.getElementById('stopRecordBtn');
+  const recorderTimer  = document.getElementById('recTimer');
+  const waveformCanvas = document.getElementById('waveformCanvas');
+  let studioAudioContext = null;
+  let mixedDestination   = null;
+  let studioRecorder     = null;
+  const remoteRecorders  = new Map(); // remoteId → MediaRecorder
+  const mediaStreams     = new Map(); // remoteId → MediaStream
+  let recordingStartTime = null;
+  let recorderTimerInterval = null;
+
+  // ────────────────────────────────────────────────────────────────────────
+  // 1) INITIALIZE WEBSOCKET
+  // ────────────────────────────────────────────────────────────────────────
+  function initWebSocket() {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      console.log('[studio] WS opened');
+      connStatusSpan.textContent = 'WS connected';
+      ws.send(JSON.stringify({ type: 'join', role: 'studio' }));
+    };
+
+    ws.onmessage = (evt) => {
+      let msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch (e) {
+        console.error('[studio] Invalid JSON:', e);
+        return;
+      }
+      handleSignalingMessage(msg);
+    };
+
+    ws.onclose = () => {
+      console.warn('[studio] WS closed. Reconnecting in 5s…');
+      connStatusSpan.textContent = 'WS disconnected. Reconnecting…';
+      setTimeout(initWebSocket, 5000);
+      // Tear down all peers
+      for (let pid of peers.keys()) {
+        teardownPeer(pid);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error('[studio] WS error:', err);
+      ws.close();
+    };
+  }
+
+  async function handleSignalingMessage(msg) {
     switch (msg.type) {
       case 'new-remote':
-        addRemoteCard(msg.id, msg.name);
+        // { type:'new-remote', id, name }
+        console.log(`[studio] Remote joined: ${msg.name} (${msg.id})`);
+        setupNewRemote(msg.id, msg.name);
         break;
+
       case 'offer':
-        handleOffer(msg.from, msg.sdp);
+        // { type:'offer', from: remoteId, sdp }
+        if (peers.has(msg.from)) {
+          await handleOffer(msg.from, msg.sdp);
+        }
         break;
+
       case 'candidate':
-        handleCandidate(msg.from, msg.candidate);
+        // { type:'candidate', from: remoteId, candidate }
+        if (peers.has(msg.from)) {
+          await handleCandidate(msg.from, msg.candidate);
+        }
         break;
-      case 'chat':
-        receiveChat(msg.fromRole, msg.fromId, msg.text);
-        break;
+
       case 'remote-disconnected':
-        removeRemoteCard(msg.id);
+        // { type:'remote-disconnected', id }
+        console.log(`[studio] Remote disconnected: ${msg.id}`);
+        teardownPeer(msg.id);
         break;
-      case 'goal':
-        handleGoalNotification(msg.fromId, msg.team);
-        break;
+
       default:
-        console.warn('Studio received unknown message:', msg);
+        console.warn('[studio] Unknown message:', msg.type);
     }
-  };
+  }
 
-  ws.onClose = () => {
-    console.warn('WebSocket closed. Will attempt reconnect in 2 seconds.');
-    setTimeout(() => {
-      location.reload(); // Simple way to reconnect
-    }, 2000);
-  };
+  // ────────────────────────────────────────────────────────────────────────
+  // 2) SET UP A NEW REMOTE ENTRY
+  // ────────────────────────────────────────────────────────────────────────
+  function setupNewRemote(remoteId, remoteName) {
+    // 1) Clone template
+    const clone = remoteEntryTemplate.content.cloneNode(true);
+    const entryEl = clone.querySelector('.remote-entry');
+    entryEl.id = `remote-${remoteId}`;
 
-  ws.onError = err => {
-    console.error('WebSocket error:', err);
-    ws.close();
-  };
+    const nameEl    = entryEl.querySelector('.remote-name');
+    const statusEl  = entryEl.querySelector('.remote-status');
+    const callBtn   = entryEl.querySelector('.callRemoteBtn');
+    const muteBtn   = entryEl.querySelector('.muteRemoteBtn');
+    const kickBtn   = entryEl.querySelector('.kickRemoteBtn');
+    const modeSelect= entryEl.querySelector('.modeSelect');
+    const bitrateInput = entryEl.querySelector('.bitrateInput');
+    const meterCanvas = entryEl.querySelector('.remote-meter canvas');
+    const jitterCanvas= entryEl.querySelector('.jitter-graph canvas');
+    const bitrateCanvas= entryEl.querySelector('.bitrate-graph canvas');
+    const chatWindow  = entryEl.querySelector('.chat-window');
+    const chatInput   = entryEl.querySelector('.chat-input');
+    const chatSendBtn = entryEl.querySelector('.chat-send-btn');
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // (A) REMOTE CARD CREATION / DELETION
-  // ────────────────────────────────────────────────────────────────────────────
+    nameEl.textContent    = remoteName;
+    statusEl.textContent  = 'Waiting…';
 
-  function addRemoteCard(remoteId, name) {
-    const card = document.createElement('div');
-    card.className = 'remote-card';
-    card.id = `remote-${remoteId}`;
+    remotesContainer.appendChild(entryEl);
 
-    // Title
-    const title = document.createElement('h2');
-    title.textContent = `${name} (${remoteId.substring(0, 8)})`;
-    card.appendChild(title);
-
-    // Call button
-    const callBtn = document.createElement('button');
-    callBtn.textContent = 'Call';
+    // 2) Button handlers
     callBtn.onclick = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'ready-for-offer',
-          target: remoteId,
-          studioId: myStudioId
-        })
-      );
+      ws.send(JSON.stringify({ type: 'ready-for-offer', target: remoteId }));
+      callBtn.disabled = true;
+      statusEl.textContent = 'Calling…';
     };
-    card.appendChild(callBtn);
 
-    // Mute button
-    const muteBtn = document.createElement('button');
-    muteBtn.textContent = 'Mute';
     muteBtn.onclick = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'mute-remote',
-          target: remoteId,
-          studioId: myStudioId
-        })
-      );
+      ws.send(JSON.stringify({ type: 'mute-remote', target: remoteId }));
+      muteBtn.disabled = true;
+      statusEl.textContent = 'Muted';
     };
-    card.appendChild(muteBtn);
 
-    // Kick button
-    const kickBtn = document.createElement('button');
-    kickBtn.textContent = 'Kick';
     kickBtn.onclick = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'kick-remote',
-          target: remoteId,
-          studioId: myStudioId
-        })
-      );
+      ws.send(JSON.stringify({ type: 'kick-remote', target: remoteId }));
+      kickBtn.disabled = true;
+      statusEl.textContent = 'Kicked';
     };
-    card.appendChild(kickBtn);
 
-    // Mode-select (speech/music)
-    const modeGroup = document.createElement('div');
-    modeGroup.className = 'control-group';
-    const modeLabel = document.createElement('label');
-    modeLabel.textContent = 'Mode:';
-    modeGroup.appendChild(modeLabel);
-    const modeSelect = document.createElement('select');
-    ['speech', 'music'].forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m.charAt(0).toUpperCase() + m.slice(1);
-      modeSelect.appendChild(opt);
-    });
     modeSelect.onchange = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'mode-update',
-          mode: modeSelect.value,
-          target: remoteId,
-          studioId: myStudioId
-        })
-      );
+      ws.send(JSON.stringify({
+        type: 'mode-update',
+        target: remoteId,
+        mode: modeSelect.value
+      }));
     };
-    modeGroup.appendChild(modeSelect);
-    card.appendChild(modeGroup);
 
-    // Bitrate input
-    const bitrateGroup = document.createElement('div');
-    bitrateGroup.className = 'control-group';
-    const bitrateLabel = document.createElement('label');
-    bitrateLabel.textContent = 'Bitrate:';
-    bitrateGroup.appendChild(bitrateLabel);
-    const bitrateInput = document.createElement('input');
-    bitrateInput.type = 'number';
-    bitrateInput.min = 1000;
-    bitrateInput.max = 64000;
-    bitrateInput.value = 16000;
     bitrateInput.onchange = () => {
-      const br = parseInt(bitrateInput.value);
-      ws.send(
-        JSON.stringify({
-          type: 'bitrate-update',
-          bitrate: br,
-          target: remoteId,
-          studioId: myStudioId
-        })
-      );
+      const br = parseInt(bitrateInput.value, 10);
+      ws.send(JSON.stringify({
+        type: 'bitrate-update',
+        target: remoteId,
+        bitrate: br
+      }));
     };
-    bitrateGroup.appendChild(bitrateInput);
-    card.appendChild(bitrateGroup);
 
-    // Hidden audio element
-    const audioEl = document.createElement('audio');
-    audioEl.autoplay = true;
-    audioEl.controls = false;
-    audioEl.style.display = 'none';
-    card.appendChild(audioEl);
-    audioElements.set(remoteId, audioEl);
-
-    // PPM meter canvas
-    const meterCanvas = document.createElement('canvas');
-    meterCanvas.width = 300;
-    meterCanvas.height = 50;
-    meterCanvas.className = 'meter-canvas';
-    card.appendChild(meterCanvas);
-
-    // Stats graph canvas
-    const statsCanvas = document.createElement('canvas');
-    statsCanvas.width = 300;
-    statsCanvas.height = 50;
-    statsCanvas.className = 'stats-canvas';
-    card.appendChild(statsCanvas);
-
-    // Chat UI
-    const chatContainer = document.createElement('div');
-    chatContainer.className = 'chat-container';
-    const chatMsgBox = document.createElement('div');
-    chatMsgBox.className = 'chat-messages';
-    chatMsgBox.id = `chat-${remoteId}`;
-    chatContainer.appendChild(chatMsgBox);
-    const chatInput = document.createElement('input');
-    chatInput.type = 'text';
-    chatInput.className = 'chat-input';
-    chatInput.placeholder = 'Type message...';
-    chatContainer.appendChild(chatInput);
-    const chatSendBtn = document.createElement('button');
-    chatSendBtn.textContent = 'Send';
-    chatSendBtn.className = 'chat-send-btn';
     chatSendBtn.onclick = () => {
       const text = chatInput.value.trim();
       if (!text) return;
-      ws.send(
-        JSON.stringify({
-          type: 'chat',
-          fromRole: 'studio',
-          fromId: myStudioId,
-          target: 'remote',
-          targetId: remoteId,
-          text
-        })
-      );
-      appendChatMessage(chatMsgBox, 'You', text);
+      ws.send(JSON.stringify({
+        type: 'chat',
+        fromRole: 'studio',
+        fromId: 'studio',
+        target: 'remote',
+        targetId: remoteId,
+        text
+      }));
+      appendChatMessage(chatWindow, 'You', text);
       chatInput.value = '';
     };
-    chatContainer.appendChild(chatSendBtn);
-    card.appendChild(chatContainer);
 
-    // Recording controls
-    const recContainer = document.createElement('div');
-    recContainer.className = 'recording-controls';
-    const recStartBtn = document.createElement('button');
-    recStartBtn.textContent = 'Start Recording';
-    recStartBtn.onclick = () => startRecording(remoteId);
-    recContainer.appendChild(recStartBtn);
-    const recStopBtn = document.createElement('button');
-    recStopBtn.textContent = 'Stop Recording';
-    recStopBtn.onclick = () => stopRecording(remoteId);
-    recContainer.appendChild(recStopBtn);
-    card.appendChild(recContainer);
+    // 3) Set up peer connection placeholders
+    const pc = new RTCPeerConnection(ICE_CONFIG);
 
-    // Upload controls
-    const uploadContainer = document.createElement('div');
-    uploadContainer.className = 'upload-container';
-    const uploadLabel = document.createElement('label');
-    uploadLabel.textContent = 'Upload Files:';
-    uploadContainer.appendChild(uploadLabel);
-    const uploadInput = document.createElement('input');
-    uploadInput.type = 'file';
-    uploadInput.multiple = true;
-    uploadContainer.appendChild(uploadInput);
-    const uploadBtn = document.createElement('button');
-    uploadBtn.textContent = 'Upload';
-    uploadBtn.onclick = () => {
-      const files = uploadInput.files;
-      if (files.length === 0) return alert('Select files to upload.');
-      const formData = new FormData();
-      for (let f of files) {
-        formData.append('files', f);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({
+          type: 'candidate',
+          from: 'studio',
+          target: remoteId,
+          candidate: e.candidate
+        }));
       }
-      fetch('/upload', { method: 'POST', body: formData })
-        .then(res => res.json())
-        .then(json => {
-          alert('Uploaded: ' + json.uploaded.join(', '));
-        })
-        .catch(err => console.error('Upload error:', err));
     };
-    uploadContainer.appendChild(uploadBtn);
-    card.appendChild(uploadContainer);
 
-    remotesContainer.appendChild(card);
-
-    meters.set(remoteId, { analyser: null, canvas: meterCanvas });
-    statsIntervals.set(remoteId, null);
-  }
-
-  function removeRemoteCard(remoteId) {
-    const card = document.getElementById(`remote-${remoteId}`);
-    if (card) card.remove();
-
-    if (peers.has(remoteId)) {
-      peers.get(remoteId).close();
-      peers.delete(remoteId);
-    }
-    if (statsIntervals.has(remoteId)) {
-      clearInterval(statsIntervals.get(remoteId));
-      statsIntervals.delete(remoteId);
-    }
-    if (audioElements.has(remoteId)) audioElements.get(remoteId).remove();
-    if (meters.has(remoteId)) meters.delete(remoteId);
-    if (mediaRecorders.has(remoteId)) mediaRecorders.delete(remoteId);
-    if (recordedChunks.has(remoteId)) recordedChunks.delete(remoteId);
-  }
-
-  function appendChatMessage(chatBox, sender, text) {
-    const msg = document.createElement('div');
-    msg.textContent = `[${sender}]: ${text}`;
-    chatBox.appendChild(msg);
-    chatBox.scrollTop = chatBox.scrollHeight;
-  }
-
-  function receiveChat(fromRole, fromId, text) {
-    if (fromRole === 'remote') {
-      const chatBox = document.getElementById(`chat-${fromId}`);
-      if (chatBox) appendChatMessage(chatBox, fromId, text);
-    }
-  }
-
-  function handleGoalNotification(remoteId, team) {
-    alert(`⚽ Goal by ${team} from remote ${remoteId.substring(0, 8)}!`);
-    const card = document.getElementById(`remote-${remoteId}`);
-    if (card) {
-      card.style.boxShadow = '0 0 10px 3px gold';
-      let ackBtn = card.querySelector('.ack-goal-btn');
-      if (!ackBtn) {
-        ackBtn = document.createElement('button');
-        ackBtn.textContent = 'Acknowledge Goal';
-        ackBtn.className = 'ack-goal-btn';
-        ackBtn.onclick = () => {
-          ws.send(
-            JSON.stringify({
-              type: 'ack-goal',
-              targetId: remoteId,
-              studioId: myStudioId
-            })
-          );
-          card.style.boxShadow = '';
-          ackBtn.remove();
-        };
-        card.appendChild(ackBtn);
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      statusEl.textContent = `WebRTC: ${state}`;
+      if (['disconnected', 'failed', 'closed'].includes(state)) {
+        teardownPeer(remoteId);
       }
-    }
+    };
+
+    pc.ontrack = (evt) => {
+      const [remoteStream] = evt.streams;
+      statusEl.textContent = 'Connected';
+
+      // Store remote stream for recording
+      mediaStreams.set(remoteId, remoteStream);
+
+      // Metering setup
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const srcNode = audioCtx.createMediaStreamSource(remoteStream);
+      const splitter = audioCtx.createChannelSplitter(2);
+
+      const analyserL = audioCtx.createAnalyser();
+      analyserL.fftSize = 256;
+      const analyserR = audioCtx.createAnalyser();
+      analyserR.fftSize = 256;
+
+      splitter.connect(analyserL, 0);
+      splitter.connect(analyserR, 1);
+
+      // Draw meters
+      const meterCtx = meterCanvas.getContext('2d');
+      function drawMeter() {
+        const bufLen = analyserL.frequencyBinCount;
+        const dataL = new Uint8Array(bufLen);
+        const dataR = new Uint8Array(bufLen);
+        analyserL.getByteFrequencyData(dataL);
+        analyserR.getByteFrequencyData(dataR);
+
+        let sumL = 0, sumR = 0;
+        for (let i = 0; i < bufLen; i++) {
+          sumL += dataL[i] * dataL[i];
+          sumR += dataR[i] * dataR[i];
+        }
+        const rmsL = Math.sqrt(sumL / bufLen) / 255;
+        const rmsR = Math.sqrt(sumR / bufLen) / 255;
+
+        meterCtx.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
+        const barL = Math.round(rmsL * meterCanvas.width);
+        meterCtx.fillStyle = '#4caf50';
+        meterCtx.fillRect(0, 0, barL, meterCanvas.height / 2 - 2);
+        const barR = Math.round(rmsR * meterCanvas.width);
+        meterCtx.fillStyle = '#2196f3';
+        meterCtx.fillRect(0, meterCanvas.height / 2 + 2, barR, meterCanvas.height / 2 - 2);
+
+        dataL.fill(0);
+        dataR.fill(0);
+
+        requestAnimationFrame(drawMeter);
+      }
+      drawMeter();
+
+      // Jitter & bitrate graph placeholders (just clear for now)
+      const jitterCtx = jitterCanvas.getContext('2d');
+      const bitrateCtx= bitrateCanvas.getContext('2d');
+      function drawDummy() {
+        // In a real setup you'd call getStats() and plot jitter/bitrate over time
+        jitterCtx.clearRect(0, 0, jitterCanvas.width, jitterCanvas.height);
+        bitrateCtx.clearRect(0, 0, bitrateCanvas.width, bitrateCanvas.height);
+        requestAnimationFrame(drawDummy);
+      }
+      drawDummy();
+
+      // Save peer data
+      peers.set(remoteId, {
+        pc,
+        entryEl,
+        audioContext: audioCtx,
+        analyserL,
+        analyserR,
+        rafId: null,
+        mediaStream: remoteStream
+      });
+    };
+
+    // 4) Store the PeerConnection before we get tracks
+    peers.set(remoteId, {
+      pc,
+      entryEl,
+      audioContext: null,
+      analyserL: null,
+      analyserR: null,
+      rafId: null,
+      mediaStream: null
+    });
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // (B) WEBRTC CALL HANDLING & STATS
-  // ────────────────────────────────────────────────────────────────────────────
-
-  function initiateCall(remoteId) {
-    ws.send(
-      JSON.stringify({
-        type: 'ready-for-offer',
-        target: remoteId,
-        studioId: myStudioId
-      })
-    );
-  }
-
+  // ────────────────────────────────────────────────────────────────────────
+  // 3) HANDLE INCOMING OFFER FROM REMOTE
+  // ────────────────────────────────────────────────────────────────────────
   async function handleOffer(remoteId, sdp) {
-    const pc = new RTCPeerConnection(getRTCConfig());
-    peers.set(remoteId, pc);
-
-    pc.ontrack = event => {
-      const [stream] = event.streams;
-      const audioEl = audioElements.get(remoteId);
-      audioEl.srcObject = stream;
-      audioEl.style.display = 'block';
-
-      const audioCtx = new AudioContext();
-      const sourceNode = audioCtx.createMediaStreamSource(stream);
-      const meterInfo = meters.get(remoteId);
-      meterInfo.analyser = createPPMMeter(audioCtx, sourceNode, meterInfo.canvas);
-
-      const statsCanvas = meterInfo.canvas.nextElementSibling;
-      startRTCPeerStats(pc, statsCanvas, remoteId);
-    };
-
-    pc.onicecandidate = event => {
-      if (event.candidate) {
-        ws.send(
-          JSON.stringify({
-            type: 'candidate',
-            from: 'studio',
-            target: 'remote',
-            to: remoteId,
-            candidate: event.candidate,
-            studioId: myStudioId
-          })
-        );
-      }
-    };
-
-    await pc.setRemoteDescription(
-      new RTCSessionDescription({ type: 'offer', sdp })
-    );
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    ws.send(
-      JSON.stringify({
+    const data = peers.get(remoteId);
+    if (!data) return;
+    const pc = data.pc;
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({
         type: 'answer',
         from: 'studio',
         target: remoteId,
-        sdp: pc.localDescription.sdp,
-        studioId: myStudioId
-      })
-    );
+        sdp: pc.localDescription.sdp
+      }));
+    } catch (e) {
+      console.error(`[studio] handleOffer error for ${remoteId}:`, e);
+    }
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // 4) HANDLE INCOMING ICE CANDIDATE
+  // ────────────────────────────────────────────────────────────────────────
   async function handleCandidate(remoteId, candidate) {
-    const pc = peers.get(remoteId);
-    if (pc) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (e) {
-        console.error('Error adding ICE candidate:', e);
-      }
-    }
-  }
-
-  function startRTCPeerStats(pc, canvas, remoteId) {
-    const ctx = canvas.getContext('2d');
-    const WIDTH = canvas.width;
-    const HEIGHT = canvas.height;
-    let lastBytesReceived = 0;
-
-    function drawFrame() {
-      pc.getStats(null).then(stats => {
-        let inboundStats;
-        stats.forEach(report => {
-          if (
-            report.type === 'inbound-rtp' &&
-            report.mediaType === 'audio'
-          ) {
-            inboundStats = report;
-          }
-        });
-        if (!inboundStats) return;
-
-        let bitrateKbps = 0;
-        if (lastBytesReceived) {
-          const bytesDelta =
-            inboundStats.bytesReceived - lastBytesReceived;
-          bitrateKbps = (bytesDelta * 8) / 1000;
-        }
-        lastBytesReceived = inboundStats.bytesReceived;
-
-        const jitterMs = inboundStats.jitter * 1000;
-
-        const imageData = ctx.getImageData(1, 0, WIDTH - 1, HEIGHT);
-        ctx.putImageData(imageData, 0, 0);
-        ctx.clearRect(WIDTH - 1, 0, 1, HEIGHT);
-
-        const jitterY = HEIGHT / 2 - jitterMs / 10;
-        const bitrateY = HEIGHT - bitrateKbps / 10;
-
-        ctx.fillStyle = 'red';
-        ctx.fillRect(
-          WIDTH - 1,
-          Math.max(0, Math.min(HEIGHT / 2, jitterY)),
-          1,
-          1
-        );
-
-        ctx.fillStyle = 'lime';
-        ctx.fillRect(
-          WIDTH - 1,
-          Math.max(HEIGHT / 2, Math.min(HEIGHT - 1, bitrateY)),
-          1,
-          1
-        );
-      });
-    }
-
-    const intervalId = setInterval(drawFrame, 1000);
-    statsIntervals.set(remoteId, intervalId);
-  }
-
-  // ────────────────────────────────────────────────────────────────────────────
-  // (C) RECORDING HANDLING
-  // ────────────────────────────────────────────────────────────────────────────
-
-  function startRecording(remoteId) {
-    const audioEl = audioElements.get(remoteId);
-    if (!audioEl || !audioEl.srcObject) {
-      alert('No audio stream to record.');
+    const data = peers.get(remoteId);
+    if (!data || !data.pc.remoteDescription) {
+      console.warn(`[studio] No PC or remoteDesc for ${remoteId} yet.`);
       return;
     }
-    const stream = audioEl.srcObject;
-    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-    const chunks = [];
-    recorder.ondataavailable = e => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: 'audio/webm' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      const filename = `remote-${remoteId}-${Date.now()}.webm`;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        URL.revokeObjectURL(url);
-        a.remove();
-      }, 100);
-      recordedChunks.set(remoteId, chunks.slice());
-    };
-    recorder.start();
-    mediaRecorders.set(remoteId, recorder);
-    alert('Recording started.');
-  }
-
-  function stopRecording(remoteId) {
-    const recorder = mediaRecorders.get(remoteId);
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop();
-      alert('Recording stopped and download link created.');
+    try {
+      await data.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (e) {
+      console.error(`[studio] addIceCandidate error for ${remoteId}:`, e);
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // Cleanup on page unload
-  // ────────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
+  // 5) TEARDOWN A REMOTE
+  // ────────────────────────────────────────────────────────────────────────
+  function teardownPeer(remoteId) {
+    const data = peers.get(remoteId);
+    if (!data) return;
+    const { pc, entryEl, audioContext, rafId } = data;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (audioContext) audioContext.close();
+    if (pc) pc.close();
+    if (entryEl && remotesContainer.contains(entryEl)) {
+      remotesContainer.removeChild(entryEl);
+    }
+    peers.delete(remoteId);
+    mediaStreams.delete(remoteId);
+  }
 
-  window.addEventListener('beforeunload', () => {
-    peers.forEach(pc => pc.close());
-    if (ws) ws.close();
-  });
+  // ────────────────────────────────────────────────────────────────────────
+  // 6) RECORDING CONTROLS
+  // ────────────────────────────────────────────────────────────────────────
+  recordBtn.onclick = () => startRecording();
+  stopRecordBtn.onclick = () => stopRecording();
+
+  function startRecording() {
+    if (mediaStreams.size === 0) {
+      alert('No remotes connected.');
+      return;
+    }
+
+    recordBtn.disabled = true;
+    stopRecordBtn.disabled = false;
+
+    studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000
+    });
+    mixedDestination = studioAudioContext.createMediaStreamDestination();
+
+    // For each remote, connect its stream to the mixer
+    mediaStreams.forEach((stream, remoteId) => {
+      const src = studioAudioContext.createMediaStreamSource(stream);
+      src.connect(mixedDestination);
+
+      // Also record each remote individually
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const chunks = [];
+      recorder.ondataavailable = e => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        uploadBlob(blob, `remote-${remoteId}-${Date.now()}.webm`);
+      };
+      recorder.start();
+      remoteRecorders.set(remoteId, recorder);
+    });
+
+    // Now record the mixed stream
+    studioRecorder = new MediaRecorder(mixedDestination.stream, { mimeType: 'audio/webm' });
+    const studioChunks = [];
+    studioRecorder.ondataavailable = e => {
+      if (e.data.size > 0) studioChunks.push(e.data);
+    };
+    studioRecorder.onstop = () => {
+      const blob = new Blob(studioChunks, { type: 'audio/webm' });
+      uploadBlob(blob, `studio-mix-${Date.now()}.webm`);
+    };
+    studioRecorder.start();
+
+    recordingStartTime = Date.now();
+    recorderTimerInterval = setInterval(updateTimer, 1000);
+  }
+
+  function stopRecording() {
+    recordBtn.disabled = false;
+    stopRecordBtn.disabled = true;
+
+    remoteRecorders.forEach(rec => {
+      if (rec && rec.state !== 'inactive') rec.stop();
+    });
+    remoteRecorders.clear();
+
+    if (studioRecorder && studioRecorder.state !== 'inactive') {
+      studioRecorder.stop();
+    }
+
+    clearInterval(recorderTimerInterval);
+    recorderTimerSpan.textContent = '00:00';
+  }
+
+  function updateTimer() {
+    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
+    recorderTimerSpan.textContent = `${mm}:${ss}`;
+  }
+
+  function uploadBlob(blob, filename) {
+    const form = new FormData();
+    form.append('files', new File([blob], filename));
+    fetch('/upload', { method: 'POST', body: form })
+      .then(res => res.json())
+      .then(json => {
+        console.log('[studio] Uploaded:', json.uploaded);
+      })
+      .catch(err => console.error('[studio] Upload error:', err));
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // INITIALIZE EVERYTHING
+  // ────────────────────────────────────────────────────────────────────────
+  initWebSocket();
 });

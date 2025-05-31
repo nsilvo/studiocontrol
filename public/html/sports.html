@@ -2,60 +2,184 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sports Remote</title>
-  <link rel="stylesheet" href="css/sports.css" />
+  <title>Sports Remote Interface</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      background: #333;
+      color: #fff;
+      padding: 10px 20px;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.5em;
+    }
+    .container {
+      max-width: 800px;
+      margin: 20px auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 5px;
+    }
+    .section {
+      margin-bottom: 20px;
+    }
+    .section h2 {
+      margin-top: 0;
+      font-size: 1.2em;
+    }
+    .form-group {
+      margin-bottom: 10px;
+    }
+    .form-group label {
+      display: inline-block;
+      width: 120px;
+      font-weight: bold;
+    }
+    .form-group input {
+      padding: 5px;
+      width: 200px;
+    }
+    .button-group {
+      margin-top: 10px;
+    }
+    button {
+      padding: 8px 12px;
+      margin-right: 10px;
+      border: none;
+      background: #007bff;
+      color: #fff;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    button:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+    .meter-canvas {
+      border: 1px solid #555;
+      background: #333;
+      display: block;
+      width: 100%;
+      height: 20px;
+      margin-top: 10px;
+    }
+    .chat-window {
+      height: 150px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      background: #fafafa;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .chat-message {
+      margin-bottom: 5px;
+    }
+    .record-controls {
+      margin-top: 10px;
+    }
+    .segment-player {
+      margin-top: 10px;
+    }
+    #bitrateSelector {
+      margin-left: 10px;
+    }
+    #connStatus {
+      font-weight: bold;
+      margin-left: 10px;
+    }
+  </style>
 </head>
 <body>
-  <div id="container">
-    <div id="join-panel">
-      <h1>Join as Sports Remote</h1>
-      <div class="control-group">
-        <label for="reporter-input">Reporter Name:</label>
-        <input type="text" id="reporter-input" placeholder="Your Name" />
+  <header>
+    <h1>Sports Remote Interface</h1>
+  </header>
+
+  <div class="container" id="setup-section">
+    <div class="section">
+      <h2>Enter Your Details to Connect</h2>
+      <div class="form-group">
+        <label for="reporterNameInput">Reporter Name:</label>
+        <input type="text" id="reporterNameInput" placeholder="e.g. John Doe" />
       </div>
-      <div class="control-group">
-        <label for="teamA-input">Team A:</label>
-        <input type="text" id="teamA-input" placeholder="Team A Name" />
+      <div class="form-group">
+        <label for="teamAInput">Team A:</label>
+        <input type="text" id="teamAInput" placeholder="Home Team" />
       </div>
-      <div class="control-group">
-        <label for="teamB-input">Team B:</label>
-        <input type="text" id="teamB-input" placeholder="Team B Name" />
+      <div class="form-group">
+        <label for="teamBInput">Team B:</label>
+        <input type="text" id="teamBInput" placeholder="Away Team" />
       </div>
-      <button id="reporter-input-btn">Join</button>
+      <button id="connectBtn">Connect</button>
+    </div>
+  </div>
+
+  <div class="container" id="sports-ui" style="display: none;">
+    <!-- CONTROLS SECTION -->
+    <div class="section">
+      <h2>Controls & Status</h2>
+      <button id="muteSelfBtn">Mute Myself</button>
+      <button id="toneBtn">Send GLITS Tone</button>
+      <button id="listenStudioBtn">Listen to Studio</button>
+      <span id="connStatus">Not connected</span>
+      <br /><br />
+      <label for="bitrateSelector">Audio Quality:</label>
+      <select id="bitrateSelector">
+        <option value="32000">Voice (32 kbps)</option>
+        <option value="64000">Standard (64 kbps)</option>
+        <option value="128000">High (128 kbps)</option>
+      </select>
     </div>
 
-    <div id="main-panel" class="hidden">
-      <h1>Sports Remote Dashboard</h1>
-      <div id="status">Awaiting call...</div>
-
-      <div class="scoreboard">
-        <label for="scoreA">Score A:</label>
-        <input type="number" id="scoreA" value="0" />
-        <label for="scoreB">Score B:</label>
-        <input type="number" id="scoreB" value="0" />
-        <button id="goal-btn">Goal!</button>
+    <!-- SCORE & GOAL SECTION -->
+    <div class="section">
+      <h2>Scoreboard</h2>
+      <div class="form-group">
+        <label for="scoreAInput">Score A:</label>
+        <input type="number" id="scoreAInput" min="0" value="0" />
       </div>
-
-      <div class="control-group">
-        <button id="tone-toggle-btn">Start Test Tone</button>
-        <button id="mute-toggle-btn">Mute Mic</button>
+      <div class="form-group">
+        <label for="scoreBInput">Score B:</label>
+        <input type="number" id="scoreBInput" min="0" value="0" />
       </div>
-      <canvas id="ppm-meter"></canvas>
-
-      <div id="chat-container">
-        <h3>Chat</h3>
-        <div id="chat-messages"></div>
-        <input type="text" id="chat-input" placeholder="Type message..." />
-        <button id="chat-send-btn">Send</button>
+      <div class="button-group">
+        <button id="updateScoreBtn">Update Score</button>
+        <button id="goalBtn" style="background: #dc3545;">Goal!</button>
       </div>
+    </div>
 
-      <div id="segments-container">
-        <h3>Segment Recordings</h3>
-        <button id="start-segment-btn">Start Segment</button>
-        <button id="stop-segment-btn">Stop Segment</button>
-        <ul id="segments-list"></ul>
+    <!-- AUDIO METER SECTION -->
+    <div class="section">
+      <h2>Your Audio Level</h2>
+      <canvas id="meter-canvas" class="meter-canvas"></canvas>
+    </div>
+
+    <!-- RECORDING SECTION -->
+    <div class="section">
+      <h2>Local Segment Recording</h2>
+      <div class="record-controls">
+        <button id="startSegmentBtn">Start Segment</button>
+        <button id="stopSegmentBtn" disabled>Stop Segment</button>
+      </div>
+      <div id="segmentPlayerContainer"></div>
+    </div>
+
+    <!-- CHAT SECTION -->
+    <div class="section">
+      <h2>Chat with Studio</h2>
+      <div class="chat-window" id="chatWindow"></div>
+      <div style="display: flex; margin-top: 5px;">
+        <input type="text" id="chatInput" placeholder="Type message..." />
+        <button id="sendChatBtn">Send</button>
       </div>
     </div>
   </div>

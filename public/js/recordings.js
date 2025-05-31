@@ -1,141 +1,200 @@
 /**
- * public/js/recordings.js
- * 
- * Logic for the Recordings page:
- *  - Fetch list of recordings from /recordings
- *  - For each file: draw full waveform on <canvas>, set up playback with moving ticker
+ * recordings.js
+ *
+ * Fetches GET /recordings to retrieve a JSON array of filenames.
+ * For each recording:
+ *  • Creates a `.recording-entry` with:
+ *    - <div class="recording-title">filename</div>
+ *    - <div class="waveform-container">
+ *        <canvas class="waveform-canvas"></canvas>
+ *        <div class="ticker"></div>
+ *      </div>
+ *    - <div class="controls">
+ *        <audio controls preload="none"></audio>
+ *        <button class="playPauseBtn">Play</button>
+ *        <span class="timeDisplay">00:00 / 00:00</span>
+ *      </div>
+ *  • Fetches the audio file as an ArrayBuffer, decodes via Web Audio API, draws full waveform on canvas.
+ *  • Hooks up the <audio> element’s `timeupdate` to move the ticker across the canvas.
  */
 
-const recordingsListDiv = document.getElementById('recordings-list');
-const RECORDINGS_API = '/recordings';
+document.addEventListener('DOMContentLoaded', () => {
+  const recordingsContainer = document.getElementById('recordingsContainer');
 
-async function fetchRecordings() {
-  try {
-    const res = await fetch(RECORDINGS_API);
-    const json = await res.json();
-    return json.recordings;
-  } catch (err) {
-    console.error('Error fetching recordings:', err);
-    return [];
-  }
-}
-
-async function displayRecordings() {
-  const recordings = await fetchRecordings();
-  recordings.forEach(filename => {
-    createRecordingItem(filename);
-  });
-}
-
-function createRecordingItem(filename) {
-  const item = document.createElement('div');
-  item.className = 'recording-item';
-
-  const title = document.createElement('h2');
-  title.textContent = filename;
-  item.appendChild(title);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 300;
-  canvas.height = 80;
-  item.appendChild(canvas);
-
-  const playBtn = document.createElement('button');
-  playBtn.textContent = 'Play';
-  item.appendChild(playBtn);
-
-  const audio = new Audio(`/recordings/${encodeURIComponent(filename)}`);
-  audio.crossOrigin = 'anonymous';
-
-  // Draw waveform once audio metadata is loaded
-  audio.addEventListener('loadedmetadata', () => {
-    drawWaveform(audio, canvas);
-  });
-
-  // Flashing ticker during playback
-  let tickerInterval = null;
-  playBtn.addEventListener('click', () => {
-    if (audio.paused) {
-      audio.play();
-      playBtn.textContent = 'Pause';
-      startTicker(audio, canvas);
-    } else {
-      audio.pause();
-      playBtn.textContent = 'Play';
-      stopTicker();
-    }
-  });
-  audio.addEventListener('ended', () => {
-    playBtn.textContent = 'Play';
-    stopTicker();
-  });
-
-  recordingsListDiv.appendChild(item);
-
-  function startTicker(audioEl, canvasEl) {
-    const ctx = canvasEl.getContext('2d');
-    const WIDTH = canvasEl.width;
-    const HEIGHT = canvasEl.height;
-    tickerInterval = setInterval(() => {
-      // Calculate position based on currentTime / duration
-      const ratio = audioEl.currentTime / audioEl.duration;
-      const x = ratio * WIDTH;
-
-      // Clear previous overlay (we redraw entire waveform each time, so need to re-draw)
-      // Easiest: re-draw the waveform each interval, then draw ticker line on top.
-      drawWaveform(audioEl, canvasEl).then(() => {
-        ctx.strokeStyle = 'yellow';
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, HEIGHT);
-        ctx.stroke();
-      });
-    }, 100);
-  }
-
-  function stopTicker() {
-    if (tickerInterval) {
-      clearInterval(tickerInterval);
-      tickerInterval = null;
+  // 1) Fetch the list of recordings
+  async function fetchRecordingsList() {
+    try {
+      const resp = await fetch('/recordings');
+      const json = await resp.json();
+      return json.recordings || [];
+    } catch (err) {
+      console.error('Error fetching recordings list:', err);
+      return [];
     }
   }
-}
 
-// Draw waveform for an <audio> element on a canvas
-async function drawWaveform(audioEl, canvasEl) {
-  const ctx = canvasEl.getContext('2d');
-  const WIDTH = canvasEl.width;
-  const HEIGHT = canvasEl.height;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  // 2) For each filename, create UI entry
+  async function renderRecording(filename) {
+    const entryEl = document.createElement('div');
+    entryEl.className = 'recording-entry';
 
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const response = await fetch(audioEl.src);
-  const arrayBuffer = await response.arrayBuffer();
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    const titleEl = document.createElement('div');
+    titleEl.className = 'recording-title';
+    titleEl.textContent = filename;
+    entryEl.appendChild(titleEl);
 
-  const rawData = audioBuffer.getChannelData(0); // assume mono or use channel 0
-  const samples = WIDTH; // number of samples in width
-  const blockSize = Math.floor(rawData.length / samples); // number of samples per block
-  const filteredData = [];
-  for (let i = 0; i < samples; i++) {
-    let blockStart = i * blockSize;
-    let sum = 0;
-    for (let j = 0; j < blockSize; j++) {
-      sum += Math.abs(rawData[blockStart + j]);
+    // Waveform container
+    const wfContainer = document.createElement('div');
+    wfContainer.className = 'waveform-container';
+    wfContainer.style.width = '100%';
+    wfContainer.style.height = '100px';
+    wfContainer.style.position = 'relative';
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'waveform-canvas';
+    canvas.width = wfContainer.clientWidth;
+    canvas.height = 100;
+    wfContainer.appendChild(canvas);
+
+    const ticker = document.createElement('div');
+    ticker.className = 'ticker';
+    ticker.style.left = '0px';
+    wfContainer.appendChild(ticker);
+
+    entryEl.appendChild(wfContainer);
+
+    // Controls: audio element + play/pause button + time display
+    const controlsEl = document.createElement('div');
+    controlsEl.className = 'controls';
+
+    const audioEl = document.createElement('audio');
+    audioEl.controls = true;
+    audioEl.preload = 'none';
+    audioEl.src = `/recordings/${encodeURIComponent(filename)}`;
+    controlsEl.appendChild(audioEl);
+
+    const playPauseBtn = document.createElement('button');
+    playPauseBtn.textContent = 'Play';
+    controlsEl.appendChild(playPauseBtn);
+
+    const timeDisplay = document.createElement('span');
+    timeDisplay.className = 'timeDisplay';
+    timeDisplay.textContent = '00:00 / 00:00';
+    controlsEl.appendChild(timeDisplay);
+
+    entryEl.appendChild(controlsEl);
+
+    recordingsContainer.appendChild(entryEl);
+
+    // Once we have the audio ArrayBuffer, decode and draw waveform
+    try {
+      const arrayBuffer = await fetch(`/recordings/${encodeURIComponent(filename)}`).then((r) =>
+        r.arrayBuffer()
+      );
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      drawFullWaveform(canvas, audioBuffer);
+      setupTicker(canvas, ticker, audioEl, timeDisplay, audioBuffer.duration);
+    } catch (err) {
+      console.error(`Error loading or decoding ${filename}:`, err);
     }
-    filteredData.push(sum / blockSize);
-  }
-  // Normalize
-  const multiplier = HEIGHT / Math.max(...filteredData);
-  ctx.fillStyle = '#0f0';
-  filteredData.forEach((val, i) => {
-    const x = i;
-    const y = HEIGHT - val * multiplier;
-    ctx.fillRect(x, y, 1, val * multiplier);
-  });
-}
 
-window.addEventListener('DOMContentLoaded', () => {
-  displayRecordings();
+    // Play/pause button toggles playback
+    playPauseBtn.onclick = () => {
+      if (audioEl.paused) {
+        audioEl.play();
+        playPauseBtn.textContent = 'Pause';
+      } else {
+        audioEl.pause();
+        playPauseBtn.textContent = 'Play';
+      }
+    };
+
+    // Sync time display and ticker when user clicks on <audio> controls
+    audioEl.ontimeupdate = () => {
+      updateTimeDisplay(timeDisplay, audioEl.currentTime, audioEl.duration);
+      updateTickerPosition(ticker, canvas, audioEl.currentTime, audioEl.duration);
+    };
+    audioEl.onended = () => {
+      playPauseBtn.textContent = 'Play';
+    };
+  }
+
+  // Draw the entire waveform into the canvas
+  function drawFullWaveform(canvas, audioBuffer) {
+    const ctx = canvas.getContext('2d');
+    const { width, height } = canvas;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, width, height);
+
+    const channelData = audioBuffer.numberOfChannels > 1
+      ? mixDownToMono(audioBuffer.getChannelData(0), audioBuffer.getChannelData(1))
+      : audioBuffer.getChannelData(0);
+
+    const samples = channelData.length;
+    const blockSize = Math.floor(samples / width);
+    const filteredData = [];
+    for (let i = 0; i < width; i++) {
+      let sum = 0;
+      for (let j = 0; j < blockSize; j++) {
+        sum += Math.abs(channelData[i * blockSize + j]);
+      }
+      filteredData.push(sum / blockSize);
+    }
+    const multiplier = height / Math.max(...filteredData);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#0f0';
+    ctx.beginPath();
+    for (let i = 0; i < width; i++) {
+      const x = i;
+      const y = height - filteredData[i] * multiplier;
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // Helper: if stereo, average two channels into one array
+  function mixDownToMono(ch0, ch1) {
+    const length = Math.min(ch0.length, ch1.length);
+    const mono = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+      mono[i] = (ch0[i] + ch1[i]) / 2;
+    }
+    return mono;
+  }
+
+  // Setup the ticker (vertical line) to move over the waveform
+  function setupTicker(canvas, ticker, audioEl, timeDisplay, duration) {
+    function update() {
+      if (!audioEl.paused && !audioEl.ended) {
+        const fraction = audioEl.currentTime / duration;
+        const canvasWidth = canvas.width;
+        ticker.style.left = `${fraction * canvasWidth}px`;
+        updateTimeDisplay(timeDisplay, audioEl.currentTime, duration);
+      }
+      requestAnimationFrame(update);
+    }
+    update();
+  }
+
+  function updateTimeDisplay(el, current, total) {
+    function fmt(t) {
+      const mm = String(Math.floor(t / 60)).padStart(2, '0');
+      const ss = String(Math.floor(t % 60)).padStart(2, '0');
+      return `${mm}:${ss}`;
+    }
+    el.textContent = `${fmt(current)} / ${fmt(total)}`;
+  }
+
+  // Main entry
+  (async () => {
+    const recordings = await fetchRecordingsList();
+    for (let filename of recordings) {
+      await renderRecording(filename);
+    }
+  })();
 });
