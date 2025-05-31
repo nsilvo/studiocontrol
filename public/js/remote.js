@@ -18,6 +18,9 @@
  *
  * - PPM meter displays two bars (left + right). If only 1 channel is active,
  *   it displays the same data on both bars (mono).
+ *
+ * - Receives an incoming audio track from the studio (the mixed “studio audio”) and
+ *   plays it through <audio id="audio-studio">.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -36,39 +39,38 @@ document.addEventListener('DOMContentLoaded', () => {
   let ws = null;
   let pc = null;
   let localStream = null;       // Raw mic MediaStream
-  let processedStream = null;   // After compressor
   let audioSender = null;
   let remoteId = null;
   let displayName = '';
-  let currentMode = 'music';    // Default: 'music' → stereo, studio can override to 'speech'
+  let currentMode = 'music';    // Default to stereo
+  let currentBitrate = 16000;
   let hasLoggedBitrate = false;
-  let isMuted = false;
-  let isTone = false;
 
-  // GLITS‐tone nodes (always stereo)
-  let toneContext = null;
-  let toneOsc = null;
-  let toneGain = null;
-
-  // AudioContext for compression + metering
   let audioContext = null;
   let analyserL = null;
   let analyserR = null;
 
+  // GLITS‐tone state
+  let isTone = false;
+  let toneContext = null;
+  let toneOsc = null;
+  let toneGain = null;
+
   // DOM elements
-  const nameStepDiv   = document.getElementById('name-step');
-  const nameInput     = document.getElementById('nameInput');
-  const nameSubmitBtn = document.getElementById('nameSubmitBtn');
-  const mainUiDiv     = document.getElementById('main-ui');
-  const displayNameDiv= document.getElementById('display-name');
-  const statusSpan    = document.getElementById('connStatus');
-  const muteBtn       = document.getElementById('muteSelfBtn');
-  const toneBtn       = document.getElementById('toneBtn');
-  const listenBtn     = document.getElementById('listenStudioBtn');
-  const meterCanvas   = document.getElementById('meter-canvas');
-  const chatWindowEl  = document.getElementById('chatWindow');
-  const chatInputEl   = document.getElementById('chatInput');
-  const sendChatBtn   = document.getElementById('sendChatBtn');
+  const nameStepDiv    = document.getElementById('name-step');
+  const nameInput      = document.getElementById('nameInput');
+  const nameSubmitBtn  = document.getElementById('nameSubmitBtn');
+  const mainUiDiv      = document.getElementById('main-ui');
+  const displayNameDiv = document.getElementById('display-name');
+  const statusSpan     = document.getElementById('connStatus');
+  const muteBtn        = document.getElementById('muteSelfBtn');
+  const toneBtn        = document.getElementById('toneBtn');
+  const listenBtn      = document.getElementById('listenStudioBtn');
+  const meterCanvas    = document.getElementById('meter-canvas');
+  const chatWindowEl   = document.getElementById('chatWindow');
+  const chatInputEl    = document.getElementById('chatInput');
+  const sendChatBtn    = document.getElementById('sendChatBtn');
+  const audioStudioEl  = document.getElementById('audio-studio');
 
   // ────────────────────────────────────────────────────────────────────────
   // 1) STEP 1: NAME SUBMISSION
@@ -96,11 +98,13 @@ document.addEventListener('DOMContentLoaded', () => {
     ws.onopen = () => {
       console.log('[remote] WS opened');
       statusSpan.textContent = 'WS connected. Joining…';
-      ws.send(JSON.stringify({
-        type: 'join',
-        role: 'remote',
-        name: displayName
-      }));
+      ws.send(
+        JSON.stringify({
+          type: 'join',
+          role: 'remote',
+          name: displayName
+        })
+      );
     };
 
     ws.onmessage = (evt) => {
@@ -130,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  async function handleSignalingMessage(msg) {
+  function handleSignalingMessage(msg) {
     switch (msg.type) {
       case 'joined':
         // { type:'joined', id }
@@ -142,27 +146,27 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'start-call':
         // Received when studio clicks “Call”
         statusSpan.textContent = 'Starting WebRTC…';
-        await startWebRTC();
+        startWebRTC();
         break;
 
       case 'answer':
         // { type:'answer', sdp }
-        await handleAnswer(msg.sdp);
+        handleAnswer(msg.sdp);
         break;
 
       case 'candidate':
         // { type:'candidate', candidate }
-        await handleCandidate(msg.candidate);
+        handleCandidate(msg.candidate);
         break;
 
       case 'mode-update':
         // { type:'mode-update', mode:'speech'|'music' }
-        await applyMode(msg.mode);
+        applyMode(msg.mode);
         break;
 
       case 'bitrate-update':
         // { type:'bitrate-update', bitrate:<number> }
-        setAudioBitrate(msg.bitrate);
+        handleBitrateUpdate(msg.bitrate);
         break;
 
       case 'mute-update':
@@ -205,33 +209,44 @@ document.addEventListener('DOMContentLoaded', () => {
       // 3.2 Create RTCPeerConnection
       pc = new RTCPeerConnection(ICE_CONFIG);
 
-      // 3.3 Add local tracks
-      localStream.getTracks().forEach(track => {
-        audioSender = pc.addTrack(track, localStream);
-      });
+      // 3.3 Add local mic track
+      audioSender = pc.addTrack(localStream.getAudioTracks()[0], localStream);
 
-      // 3.4 ICE candidate handler
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          ws.send(JSON.stringify({
-            type: 'candidate',
-            from: remoteId,
-            target: 'studio',
-            candidate: e.candidate
-          }));
+      // 3.4 Listen for incoming studio track
+      pc.ontrack = (evt) => {
+        const [studioStream] = evt.streams;
+        if (audioStudioEl.srcObject !== studioStream) {
+          audioStudioEl.srcObject = studioStream;
+          audioStudioEl.style.display = 'block';
         }
       };
 
-      // 3.5 Create offer
+      // 3.5 ICE candidate handler
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(
+            JSON.stringify({
+              type: 'candidate',
+              from: remoteId,
+              target: 'studio',
+              candidate: e.candidate
+            })
+          );
+        }
+      };
+
+      // 3.6 Create offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // 3.6 Send offer
-      ws.send(JSON.stringify({
-        type: 'offer',
-        from: remoteId,
-        sdp: offer.sdp
-      }));
+      // 3.7 Send offer
+      ws.send(
+        JSON.stringify({
+          type: 'offer',
+          from: remoteId,
+          sdp: offer.sdp
+        })
+      );
       statusSpan.textContent = 'Offer sent. Awaiting answer…';
     } catch (err) {
       console.error('[remote] startWebRTC error:', err);
@@ -242,7 +257,9 @@ document.addEventListener('DOMContentLoaded', () => {
   async function handleAnswer(sdp) {
     if (!pc) return;
     try {
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+      await pc.setRemoteDescription(
+        new RTCSessionDescription({ type: 'answer', sdp })
+      );
       statusSpan.textContent = 'Connected to studio.';
     } catch (e) {
       console.error('[remote] setRemoteDescription error:', e);
@@ -266,19 +283,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (mode === currentMode) return;
     currentMode = mode;
 
-    // If PC isn't started yet, future startWebRTC will use updated mode
     if (!pc) {
       statusSpan.textContent = `Mode changed to ${mode}. Waiting to call.`;
       return;
     }
 
-    // Otherwise, renegotiate:
-    // 1) Stop old track
+    // Renegotiate with new channel count
+    // 1) Replace old mic track
     if (audioSender && localStream) {
       pc.removeTrack(audioSender);
       audioSender = null;
     }
-    // 2) Get new capture with updated channelCount
+    // 2) Get new stream
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -290,24 +306,28 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       localStream = newStream;
       setupPPMMeter(localStream);
-      processedStream = createCompressedStream(localStream);
-      audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
-      setAudioBitrate(currentBitrate);
-      // 3) Renegotiate
+      audioSender = pc.addTrack(localStream.getAudioTracks()[0], localStream);
+      // Reapply bitrate
+      handleBitrateUpdate(currentBitrate);
+
+      // 3) Create and send new offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({
-        type: 'offer',
-        from: remoteId,
-        sdp: offer.sdp
-      }));
+      ws.send(
+        JSON.stringify({
+          type: 'offer',
+          from: remoteId,
+          sdp: offer.sdp
+        })
+      );
       statusSpan.textContent = `Mode switched to ${mode}. Renegotiated.`;
     } catch (e) {
       console.error('[remote] applyMode error:', e);
     }
   }
 
-  function setAudioBitrate(bitrate) {
+  function handleBitrateUpdate(bitrate) {
+    currentBitrate = bitrate;
     if (!audioSender) {
       console.warn('[remote] Audio sender not ready for bitrate change');
       return;
@@ -315,15 +335,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const params = audioSender.getParameters();
     if (!params.encodings) params.encodings = [{}];
     params.encodings[0].maxBitrate = bitrate;
-    audioSender.setParameters(params)
+    audioSender
+      .setParameters(params)
       .then(() => {
         if (!hasLoggedBitrate) {
           console.log(`[remote] Audio bitrate set to ${bitrate} bps`);
           hasLoggedBitrate = true;
         }
-        statusSpan.textContent = `Bitrate set to ${Math.round(bitrate/1000)} kbps`;
+        statusSpan.textContent = `Bitrate set to ${Math.round(bitrate / 1000)} kbps`;
       })
-      .catch(err => {
+      .catch((err) => {
         console.warn('[remote] setParameters error:', err);
       });
   }
@@ -333,7 +354,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ────────────────────────────────────────────────────────────────────────
   function handleMuteUpdate(muted) {
     if (localStream) {
-      localStream.getAudioTracks().forEach(t => (t.enabled = !muted));
+      localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
       statusSpan.textContent = muted ? 'You have been muted.' : 'You are unmuted.';
     }
   }
@@ -351,13 +372,15 @@ document.addEventListener('DOMContentLoaded', () => {
   sendChatBtn.onclick = () => {
     const text = chatInputEl.value.trim();
     if (!text) return;
-    ws.send(JSON.stringify({
-      type: 'chat',
-      fromRole: 'remote',
-      fromId: remoteId,
-      target: 'studio',
-      text
-    }));
+    ws.send(
+      JSON.stringify({
+        type: 'chat',
+        fromRole: 'remote',
+        fromId: remoteId,
+        target: 'studio',
+        text
+      })
+    );
     appendChatMessage('You', text);
     chatInputEl.value = '';
   };
@@ -367,7 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ────────────────────────────────────────────────────────────────────────
   toneBtn.onclick = () => {
     if (!audioSender) {
-      alert('Audio not yet sending.');
+      alert('Audio not yet streaming.');
       return;
     }
     if (!isTone) {
@@ -376,10 +399,10 @@ document.addEventListener('DOMContentLoaded', () => {
       toneGain.gain.value = 0.1;
       toneOsc = toneContext.createOscillator();
       toneOsc.frequency.value = 1000;
-      toneOsc.connect(toneGain);
       const toneDest = toneContext.createMediaStreamDestination();
-      toneGain.connect(toneDest);
+      toneOsc.connect(toneGain).connect(toneDest);
       toneOsc.start();
+
       audioSender.replaceTrack(toneDest.stream.getAudioTracks()[0]);
       statusSpan.textContent = 'Sending test tone…';
       toneBtn.textContent = 'Stop Test Tone';
@@ -398,16 +421,19 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   muteBtn.onclick = () => {
-    if (!audioSender || !localStream) return;
+    if (!localStream) return;
     const track = localStream.getAudioTracks()[0];
     track.enabled = !track.enabled;
     muteBtn.textContent = track.enabled ? 'Mute Myself' : 'Unmute Myself';
   };
 
   listenBtn.onclick = () => {
-    // If studio audio is set up, toggle mute
-    // There is no <audio> element here for studio feedback, so just alert if not connected
-    alert('Listening to studio is not yet implemented on this page.');
+    if (!audioStudioEl.srcObject) {
+      alert('No studio audio yet.');
+      return;
+    }
+    audioStudioEl.muted = !audioStudioEl.muted;
+    listenBtn.textContent = audioStudioEl.muted ? 'Listen to Studio' : 'Mute Studio Audio';
   };
 
   // ────────────────────────────────────────────────────────────────────────
@@ -417,6 +443,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (audioContext) {
       audioContext.close();
       audioContext = null;
+      analyserL = null;
+      analyserR = null;
     }
     audioContext = new (window.AudioContext || window.webkitAudioContext)({
       sampleRate: 48000
@@ -450,7 +478,8 @@ document.addEventListener('DOMContentLoaded', () => {
       analyserL.getByteFrequencyData(dataArrayL);
       analyserR.getByteFrequencyData(dataArrayR);
 
-      let sumL = 0, sumR = 0;
+      let sumL = 0,
+        sumR = 0;
       for (let i = 0; i < bufferLength; i++) {
         sumL += dataArrayL[i] * dataArrayL[i];
         sumR += dataArrayR[i] * dataArrayR[i];
@@ -483,28 +512,4 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ws) ws.close();
     if (audioContext) audioContext.close();
   });
-
-  // Helper: create compressed stream (–14 dBFS compressor)
-  function createCompressedStream(rawStream) {
-    if (audioContext) {
-      audioContext.close();
-      audioContext = null;
-      analyserL = null;
-      analyserR = null;
-    }
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 48000
-    });
-    const srcNode = audioContext.createMediaStreamSource(rawStream);
-    const compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.setValueAtTime(-14, audioContext.currentTime);
-    compressor.knee.setValueAtTime(0, audioContext.currentTime);
-    compressor.ratio.setValueAtTime(12, audioContext.currentTime);
-    compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
-    compressor.release.setValueAtTime(0.25, audioContext.currentTime);
-    srcNode.connect(compressor);
-    const destNode = audioContext.createMediaStreamDestination();
-    compressor.connect(destNode);
-    return destNode.stream;
-  }
 });

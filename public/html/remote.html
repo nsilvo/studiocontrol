@@ -107,6 +107,12 @@
     #sendChatBtn:hover {
       background-color: #218838;
     }
+    /* The newly added audio element for studio audio */
+    #audio-studio {
+      display: block;
+      margin-top: 10px;
+      width: 100%;
+    }
   </style>
 </head>
 <body>
@@ -130,7 +136,7 @@
     <div id="controls">
       <button id="muteSelfBtn">Mute Myself</button>
       <button id="toneBtn">Send GLITS Tone</button>
-      <button id="listenStudioBtn">Listen to Studio</button>
+      <button id="listenStudioBtn">Mute Studio Audio</button>
     </div>
 
     <canvas id="meter-canvas"></canvas>
@@ -143,6 +149,9 @@
         <button id="sendChatBtn">Send</button>
       </div>
     </div>
+
+    <!-- NEW: audio element for any incoming audio track from studio -->
+    <audio id="audio-studio" autoplay controls></audio>
   </div>
 
   <script src="js/common.js"></script>

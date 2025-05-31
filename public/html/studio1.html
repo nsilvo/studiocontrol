@@ -2,65 +2,255 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Studio 1 Dashboard</title>
-  <!-- Prevent /favicon.ico 404 -->
-  <link rel="icon" href="data:," />
-
-  <!-- Main stylesheet for studio -->
-  <link rel="stylesheet" href="../css/studio.css" />
+  <title>Studio 1 Control Interface</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+      color: #333;
+    }
+    h1, h2 {
+      margin-bottom: 10px;
+    }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 10px;
+      background-color: #0066cc;
+      color: #fff;
+      font-size: 0.9em;
+      margin-right: 6px;
+    }
+    button:hover {
+      background-color: #005bb5;
+    }
+    button:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    #connStatus {
+      font-weight: bold;
+      color: #0066cc;
+    }
+    #chatContainer {
+      margin-top: 20px;
+      border: 1px solid #ccc;
+      background: #fff;
+      border-radius: 6px;
+      padding: 10px;
+      max-width: 800px;
+    }
+    #chatWindow {
+      height: 150px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 8px;
+      background: #fefefe;
+      margin-bottom: 8px;
+    }
+    #chatInput {
+      width: calc(100% - 100px);
+      padding: 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.9em;
+      margin-right: 8px;
+    }
+    #sendChatBtn {
+      background-color: #28a745;
+    }
+    #sendChatBtn:hover {
+      background-color: #218838;
+    }
+    #recordControls {
+      margin-top: 30px;
+      max-width: 800px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 10px;
+    }
+    #recordControls button {
+      margin-right: 10px;
+      padding: 8px 12px;
+    }
+    #recTimer {
+      font-weight: bold;
+      margin-left: 10px;
+    }
+    #waveformCanvas {
+      display: block;
+      margin-top: 10px;
+      border: 1px solid #666;
+      background: #222;
+      width: 100%;
+      height: 200px;
+    }
+    #remotesContainer {
+      margin-top: 30px;
+      max-width: 1000px;
+    }
+    .remote-entry {
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 20px;
+    }
+    .remote-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .remote-name {
+      font-size: 1.2em;
+      font-weight: bold;
+    }
+    .remote-status {
+      font-size: 0.9em;
+      color: #0066cc;
+      margin-left: 10px;
+    }
+    .remote-controls {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .remote-controls > * {
+      margin-right: 8px;
+      margin-top: 4px;
+    }
+    .remote-meter,
+    .jitter-graph,
+    .bitrate-graph {
+      display: inline-block;
+      vertical-align: top;
+      margin-top: 10px;
+      margin-right: 20px;
+    }
+    .remote-meter canvas,
+    .jitter-graph canvas,
+    .bitrate-graph canvas {
+      border: 1px solid #aaa;
+      background: #222;
+      display: block;
+    }
+    .graph-label {
+      font-size: 0.8em;
+      text-align: center;
+      margin-top: 4px;
+      color: #444;
+    }
+    .chat-section {
+      margin-top: 10px;
+      width: 100%;
+    }
+    .chat-section .chat-window {
+      height: 100px;
+      margin-bottom: 5px;
+      background: #fafafa;
+    }
+    .chat-input {
+      width: calc(100% - 80px);
+      padding: 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin-right: 5px;
+    }
+    .chat-send-btn {
+      padding: 6px 10px;
+      background-color: #28a745;
+    }
+    .chat-send-btn:hover {
+      background-color: #218838;
+    }
+  </style>
 </head>
 <body>
-  <header>
-    <h1>WebRTC Studio 1 Dashboard</h1>
-  </header>
-
-  <!-- Studio Dashboard: shows all requested features -->
-  <div id="studio-dashboard">
-    <main>
-      <!-- 1. Global Controls: start/stop all recordings & upload recordings directory listing -->
-      <section id="global-controls">
-        <h2>Global Controls</h2>
-        <button id="start-all-recordings">Start All Recordings</button>
-        <button id="stop-all-recordings">Stop All Recordings</button>
-        <button id="upload-recordings-dir">Upload All Recorded Files</button>
-        <div id="global-upload-status"></div>
-      </section>
-
-      <!-- 2. Connected Remotes: each remote card is injected here by studio.js -->
-      <section id="remotes-section">
-        <h2>Connected Remotes</h2>
-        <div id="remotes-container">
-          <!-- studio.js will dynamically add one “remote-card” div per connected remote -->
-        </div>
-      </section>
-
-      <!-- 3. Live Mixed Waveform: displays a combined waveform of all incoming remote audio -->
-      <section id="live-waveform-section">
-        <h2>Live Mixed Waveform</h2>
-        <canvas id="live-waveform-canvas" width="800" height="200"></canvas>
-      </section>
-
-      <!-- 4. Upload Existing Recordings: allows browsing local files to upload -->
-      <section id="upload-section">
-        <h2>Upload Existing Recordings</h2>
-        <input type="file" id="upload-input" multiple />
-        <button id="upload-files-btn">Upload Selected Files</button>
-        <div id="upload-status"></div>
-      </section>
-    </main>
+  <h1>Studio 1 Control Interface</h1>
+  <div>
+    WebSocket status: <span id="connStatus">not connected</span>
   </div>
 
-  <!-- Shared utilities (e.g. createReconnectingWebSocket, getRTCConfig, createPPMMeter) -->
-  <script src="../js/common.js"></script>
+  <!-- Chat Section -->
+  <div id="chatContainer">
+    <h2>Studio Chat</h2>
+    <div id="chatWindow"></div>
+    <input id="chatInput" type="text" placeholder="Type a message..." />
+    <button id="sendChatBtn">Send</button>
+  </div>
 
-  <!-- Identify this as “Studio 1” before loading studio.js -->
+  <!-- Recording Controls -->
+  <div id="recordControls">
+    <h2>Recording Controls</h2>
+    <button id="recordBtn">Start Recording</button>
+    <button id="stopRecordBtn" disabled>Stop Recording</button>
+    <span id="recTimer">00:00</span>
+    <canvas id="waveformCanvas"></canvas>
+  </div>
+
+  <!-- Connected Remotes -->
+  <h2>Connected Remotes</h2>
+  <div id="remotesContainer"></div>
+
+  <!-- Template for a single remote entry -->
+  <template id="remoteEntryTemplate">
+    <div class="remote-entry">
+      <div class="remote-header">
+        <div>
+          <span class="remote-name">Remote Name</span>
+          <span class="remote-status">(status)</span>
+        </div>
+        <div>
+          <button class="callRemoteBtn">Call</button>
+          <button class="muteRemoteBtn">Mute</button>
+          <button class="kickRemoteBtn">Kick</button>
+        </div>
+      </div>
+      <div class="remote-controls">
+        <label>Mode:</label>
+        <select class="modeSelect">
+          <option value="speech">Speech</option>
+          <option value="music">Music</option>
+        </select>
+
+        <label>Bitrate:</label>
+        <input type="number" class="bitrateInput" min="1000" max="128000" value="64000" />
+
+        <div class="remote-meter">
+          <canvas width="150" height="20"></canvas>
+          <div class="graph-label">PPM Meter</div>
+        </div>
+
+        <div class="jitter-graph">
+          <canvas width="150" height="20"></canvas>
+          <div class="graph-label">Jitter</div>
+        </div>
+
+        <div class="bitrate-graph">
+          <canvas width="150" height="20"></canvas>
+          <div class="graph-label">Bitrate</div>
+        </div>
+
+        <div class="chat-section">
+          <div class="chat-window"></div>
+          <input type="text" class="chat-input" placeholder="Type message..." />
+          <button class="chat-send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Pre‐set this page’s studio ID before loading the main logic -->
   <script>
     window.STUDIO_ID = "Studio 1";
   </script>
-
-  <!-- Main studio logic: handles signaling, per-remote cards, PPM meters, stats, chat, recording, waveform, uploads -->
-  <script src="../js/studio.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/studio.js"></script>
 </body>
 </html>
