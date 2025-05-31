@@ -1,11 +1,14 @@
 /**
- * remote.js
+ * remote.js (v4)
  *
- * Front-end logic for a remote contributor (v4).
- * - Handles two-way audio (remote → studio & studio → remote).
- * - “Mute Myself” now mutes remote → studio and notifies studio.
- * - Listens for “mute-update” from studio to show “Muted by Studio.”
- * - Plays incoming studio audio in a hidden <audio> element.
+ * - WebRTC “remote contributor” logic:
+ *   • Connects to signaling server as role="remote"
+ *   • Exchanges SDP offer/answer and ICE candidates
+ *   • Sends microphone audio (Opus 48kHz stereo)
+ *   • Can mute/unmute self, switch to GLITS tone, listen to studio return audio
+ *   • Displays local audio PPM meter
+ *   • Receives bitrate-update from studio to adjust encoding bitrate
+ *   • Auto‐reconnect on WS close
  */
 
 (() => {
@@ -25,42 +28,49 @@
   let localStream = null;
   let audioSender = null;
   let localID = null;
-  let displayName = '';
-  let isMuted = false; // remote's own mute state
+  let displayName = 'Remote';
+  let isMuted = false;
   let isTone = false;
   let toneOscillator = null;
   let toneContext = null;
   let toneDestination = null;
+  let toneTimer = null;
 
-  const setupSection = document.getElementById('setup-section');
-  const nameInput = document.getElementById('nameInput');
-  const connectBtn = document.getElementById('connectBtn');
-  const remoteUI = document.getElementById('remote-ui');
-  const muteSelfBtn = document.getElementById('muteSelfBtn');
+  // UI elements
+  const statusSpan = document.getElementById('connStatus');
+  const muteBtn = document.getElementById('muteSelfBtn');
   const toneBtn = document.getElementById('toneBtn');
-  const connStatusSpan = document.getElementById('connStatus');
+  const listenStudioBtn = document.getElementById('listenStudioBtn');
   const meterCanvas = document.getElementById('meter-canvas');
   const meterContext = meterCanvas.getContext('2d');
-  const studioMuteStatus = document.getElementById('studioMuteStatus');
   const chatWindowEl = document.getElementById('chatWindow');
   const chatInputEl = document.getElementById('chatInput');
   const sendChatBtn = document.getElementById('sendChatBtn');
+
+  // Hidden audio element for incoming studio audio
+  const audioStudioElem = document.getElementById('audio-studio');
 
   let audioContext = null;
   let analyserL = null;
   let analyserR = null;
 
   /////////////////////////////////////////////////////
-  // Initialize WebSocket
+  // Initialize WebSocket & event listeners
   /////////////////////////////////////////////////////
   function initWebSocket() {
     ws = new WebSocket(`wss://${window.location.host}`);
-
     ws.onopen = () => {
       console.log('WebSocket connected (remote).');
-      ws.send(JSON.stringify({ type: 'join', role: 'remote', name: displayName }));
+      statusSpan.textContent = 'connected (WS)';
+      // Send join
+      ws.send(
+        JSON.stringify({
+          type: 'join',
+          role: 'remote',
+          name: displayName,
+        })
+      );
     };
-
     ws.onmessage = (evt) => {
       let msg;
       try {
@@ -69,20 +79,17 @@
         console.error('Invalid JSON from server:', err);
         return;
       }
-
       handleSignalingMessage(msg);
     };
-
     ws.onclose = () => {
       console.warn('WebSocket closed. Reconnecting in 5 seconds...');
-      connStatusSpan.textContent = 'disconnected';
+      statusSpan.textContent = 'disconnected (WS)';
       setTimeout(initWebSocket, 5000);
       if (pc) {
         pc.close();
         pc = null;
       }
     };
-
     ws.onerror = (err) => {
       console.error('WebSocket error:', err);
       ws.close();
@@ -98,12 +105,12 @@
         // { type:'id-assigned', id }
         localID = msg.id;
         console.log('Assigned localID:', localID);
-        connStatusSpan.textContent = 'waiting';
+        statusSpan.textContent = 'waiting for studio';
         break;
 
       case 'start-call':
-        // Studio approved connection → start WebRTC
-        connStatusSpan.textContent = 'connecting...';
+        // Studio has requested us to start WebRTC
+        statusSpan.textContent = 'connecting (WebRTC)...';
         await startWebRTC();
         break;
 
@@ -119,7 +126,7 @@
 
       case 'studio-disconnected':
         console.warn('Studio disconnected.');
-        connStatusSpan.textContent = 'studio disconnected';
+        statusSpan.textContent = 'studio disconnected';
         break;
 
       case 'mute-update':
@@ -127,16 +134,15 @@
         handleMuteUpdate(msg.muted);
         break;
 
-      case 'kicked':
-        // { type:'kicked', reason:'...' }
-        alert(`You have been disconnected by the studio:\n\n${msg.reason}`);
-        ws.close();
-        connStatusSpan.textContent = 'kicked';
+      case 'bitrate-update':
+        // { type:'bitrate-update', bitrate:<number> }
+        console.log('Received bitrate-update:', msg.bitrate);
+        setAudioBitrate(msg.bitrate);
         break;
 
       case 'chat':
-        // { type:'chat', from, name, message }
-        appendChatMessage(msg.name, msg.message, msg.from === localID);
+        // { type:'chat', from:'studio', name:'Studio', message }
+        appendChatMessage(msg.name, msg.message, false);
         break;
 
       default:
@@ -145,10 +151,9 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start WebRTC handshake (getUserMedia → createOffer → send to studio)
+  // Start WebRTC: getUserMedia, createOffer, send to studio
   /////////////////////////////////////////////////////
   async function startWebRTC() {
-    // Acquire microphone (48 kHz stereo)
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -157,37 +162,29 @@
         },
       });
     } catch (err) {
-      console.error('Failed to getUserMedia:', err);
-      connStatusSpan.textContent = 'mic error';
+      console.error('getUserMedia error:', err);
+      statusSpan.textContent = 'mic error';
       return;
     }
 
-    // Create RTCPeerConnection
     pc = new RTCPeerConnection(ICE_CONFIG);
 
-    // Add audio track (remote → studio)
+    // Add mic track (remote → studio)
     const track = localStream.getAudioTracks()[0];
     audioSender = pc.addTrack(track, localStream);
 
-    // Set up local audio meter (mic)
+    // Set initial bitrate to 64kbps by default
+    setAudioBitrate(64000);
+
     setupLocalMeter(localStream);
 
-    // Handle incoming tracks (studio → remote)
     pc.ontrack = (evt) => {
       const [incomingStream] = evt.streams;
-      // Create a hidden <audio> for studio → remote if needed
-      let audioStudioElem = document.getElementById('audio-studio');
-      if (!audioStudioElem) {
-        audioStudioElem = document.createElement('audio');
-        audioStudioElem.id = 'audio-studio';
-        audioStudioElem.autoplay = true;
-        audioStudioElem.controls = false;
-        document.body.appendChild(audioStudioElem);
+      if (!audioStudioElem.srcObject) {
+        audioStudioElem.srcObject = incomingStream;
       }
-      audioStudioElem.srcObject = incomingStream;
     };
 
-    // ICE candidates → send to studio
     pc.onicecandidate = (evt) => {
       if (evt.candidate) {
         ws.send(
@@ -201,24 +198,21 @@
       }
     };
 
-    // Connection state updates
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      connStatusSpan.textContent = state;
+      statusSpan.textContent = `connected (WebRTC: ${state})`;
       console.log('Connection state:', state);
     };
 
-    // Create offer, set local description
     let offer;
     try {
       offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
     } catch (err) {
-      console.error('Failed to create/set offer:', err);
+      console.error('createOffer error:', err);
       return;
     }
 
-    // Send offer to studio
     ws.send(
       JSON.stringify({
         type: 'offer',
@@ -237,7 +231,7 @@
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
       console.log('Remote description (answer) set');
     } catch (err) {
-      console.error('Error setting remote description (answer):', err);
+      console.error('setRemoteDescription error:', err);
     }
   }
 
@@ -245,48 +239,48 @@
   // Handle ICE candidate from studio
   /////////////////////////////////////////////////////
   async function handleCandidate(candidate) {
-    if (!pc) return;
+    if (!pc || !pc.remoteDescription) return;
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
-      console.error('Error adding ICE candidate:', err);
+      console.error('addIceCandidate error:', err);
     }
   }
 
   /////////////////////////////////////////////////////
-  // Handle incoming mute-update (from studio)
+  // Handle mute-update from studio
   /////////////////////////////////////////////////////
   function handleMuteUpdate(muted) {
-    // Show mute status from studio
-    studioMuteStatus.textContent = muted
-      ? '🔇 You have been muted by the studio.'
-      : '🎙️ Studio is unmuted.';
+    if (muted) {
+      audioSender.replaceTrack(null);
+      statusSpan.textContent = 'muted by studio';
+    } else {
+      const micTrack = localStream.getAudioTracks()[0];
+      audioSender.replaceTrack(micTrack);
+      statusSpan.textContent = 'unmuted by studio';
+    }
   }
 
   /////////////////////////////////////////////////////
-  // Set up stereo meter for local audio (mic or tone)
+  // Local audio meter
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
     const source = audioContext.createMediaStreamSource(stream);
-
     const splitter = audioContext.createChannelSplitter(2);
-    source.connect(splitter);
 
     analyserL = audioContext.createAnalyser();
     analyserL.fftSize = 256;
     analyserR = audioContext.createAnalyser();
     analyserR.fftSize = 256;
 
+    source.connect(splitter);
     splitter.connect(analyserL, 0);
     splitter.connect(analyserR, 1);
 
     drawLocalMeter();
   }
 
-  /////////////////////////////////////////////////////
-  // Draw local audio meter (green = left, blue = right)
-  /////////////////////////////////////////////////////
   function drawLocalMeter() {
     if (!analyserL || !analyserR) return;
 
@@ -309,18 +303,41 @@
 
       meterContext.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
 
+      // Draw left channel (green)
       meterContext.fillStyle = '#4caf50';
       const widthL = Math.round(rmsL * meterCanvas.width);
       meterContext.fillRect(0, 0, widthL, meterCanvas.height / 2 - 1);
 
+      // Draw right channel (blue)
       meterContext.fillStyle = '#2196f3';
       const widthR = Math.round(rmsR * meterCanvas.width);
       meterContext.fillRect(0, meterCanvas.height / 2 + 1, widthR, meterCanvas.height / 2 - 1);
 
       requestAnimationFrame(draw);
     }
-
     draw();
+  }
+
+  /////////////////////////////////////////////////////
+  // Set outgoing audio bitrate on RTCRtpSender
+  /////////////////////////////////////////////////////
+  async function setAudioBitrate(bitrate) {
+    if (!audioSender) {
+      console.warn('Audio sender not yet ready for bitrate change');
+      return;
+    }
+    const params = audioSender.getParameters();
+    if (!params.encodings) params.encodings = [{}];
+    params.encodings.forEach((enc) => {
+      enc.maxBitrate = bitrate;
+    });
+    try {
+      await audioSender.setParameters(params);
+      console.log(`Audio bitrate set to ${bitrate} bps`);
+      statusSpan.textContent = `bitrate set to ${Math.round(bitrate/1000)} kbps`;
+    } catch (err) {
+      console.error('setParameters error:', err);
+    }
   }
 
   /////////////////////////////////////////////////////
@@ -332,7 +349,6 @@
     const track = isMuted ? null : localStream.getAudioTracks()[0];
     audioSender.replaceTrack(track);
 
-    // Send mute-update to studio
     ws.send(
       JSON.stringify({
         type: 'mute-update',
@@ -342,51 +358,69 @@
       })
     );
 
-    muteSelfBtn.textContent = isMuted ? 'Unmute Myself' : 'Mute Myself';
+    muteBtn.textContent = isMuted ? 'Unmute Myself' : 'Mute Myself';
   }
 
   /////////////////////////////////////////////////////
-  // Toggle sending a 1 kHz test tone
+  // Toggle listen to studio audio
+  /////////////////////////////////////////////////////
+  function toggleListenStudio() {
+    if (!audioStudioElem.srcObject) {
+      alert('You are not yet connected to studio audio.');
+      return;
+    }
+    audioStudioElem.muted = !audioStudioElem.muted;
+    listenStudioBtn.textContent = audioStudioElem.muted
+      ? 'Listen to Studio'
+      : 'Mute Studio Audio';
+  }
+
+  /////////////////////////////////////////////////////
+  // Toggle sending a GLITS tone
   /////////////////////////////////////////////////////
   function toggleTone() {
     if (!audioSender) return;
 
     if (!isTone) {
       toneContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      toneDestination = toneContext.createMediaStreamDestination();
+
       toneOscillator = toneContext.createOscillator();
       toneOscillator.type = 'sine';
-      toneOscillator.frequency.setValueAtTime(1000, toneContext.currentTime);
-
-      toneDestination = toneContext.createMediaStreamDestination();
+      toneOscillator.frequency.setValueAtTime(400, toneContext.currentTime);
       toneOscillator.connect(toneDestination);
       toneOscillator.start();
 
       const toneTrack = toneDestination.stream.getAudioTracks()[0];
       audioSender.replaceTrack(toneTrack);
 
+      let currentFreq = 400;
+      toneTimer = setInterval(() => {
+        currentFreq = currentFreq === 400 ? 1000 : 400;
+        toneOscillator.frequency.setValueAtTime(currentFreq, toneContext.currentTime);
+      }, 1000);
+
       setupLocalMeter(toneDestination.stream);
 
       isTone = true;
-      toneBtn.textContent = 'Stop Tone';
-      console.log('Switched to tone');
+      toneBtn.textContent = 'Stop GLITS Tone';
     } else {
+      clearInterval(toneTimer);
       toneOscillator.stop();
       toneOscillator.disconnect();
       toneDestination.disconnect();
 
       const micTrack = localStream.getAudioTracks()[0];
       audioSender.replaceTrack(micTrack);
-
       setupLocalMeter(localStream);
 
       isTone = false;
-      toneBtn.textContent = 'Send Tone';
-      console.log('Switched to microphone');
+      toneBtn.textContent = 'Send GLITS Tone';
     }
   }
 
   /////////////////////////////////////////////////////
-  // Append chat message to chat window
+  // Chat: append message
   /////////////////////////////////////////////////////
   function appendChatMessage(senderName, message, isLocal) {
     const div = document.createElement('div');
@@ -400,41 +434,33 @@
     chatWindowEl.scrollTop = chatWindowEl.scrollHeight;
   }
 
-  sendChatBtn.onclick = () => {
+  /////////////////////////////////////////////////////
+  // Send chat
+  /////////////////////////////////////////////////////
+  function sendChat() {
     const text = chatInputEl.value.trim();
     if (!text) return;
-    const msgObj = {
-      type: 'chat',
-      from: localID,
-      name: displayName,
-      message: text,
-      target: 'studio',
-    };
-    ws.send(JSON.stringify(msgObj));
+    ws.send(
+      JSON.stringify({
+        type: 'chat',
+        from: localID,
+        name: displayName,
+        message: text,
+        target: 'studio',
+      })
+    );
     appendChatMessage('You', text, true);
     chatInputEl.value = '';
-  };
+  }
 
   /////////////////////////////////////////////////////
-  // Event Listeners
+  // EVENT LISTENERS
   /////////////////////////////////////////////////////
-  connectBtn.onclick = () => {
-    const name = nameInput.value.trim();
-    if (!name) {
-      alert('Please enter your name.');
-      return;
-    }
-    displayName = name;
-    setupSection.style.display = 'none';
-    remoteUI.style.display = 'block';
-    connStatusSpan.textContent = 'connecting...';
+  window.addEventListener('load', () => {
     initWebSocket();
-  };
-
-  muteSelfBtn.onclick = toggleMute;
+  });
+  muteBtn.onclick = toggleMute;
   toneBtn.onclick = toggleTone;
-
-  /////////////////////////////////////////////////////
-  // End of IIFE
-  /////////////////////////////////////////////////////
+  listenStudioBtn.onclick = toggleListenStudio;
+  sendChatBtn.onclick = sendChat;
 })();

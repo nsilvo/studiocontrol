@@ -1,5 +1,5 @@
 /**
- * studio.js (v11.1)
+ * studio.js (v11.2)
  *
  * - Core WebRTC signaling and UI for studio control:
  *    • PPM meters for studio mic and each remote (with numeric scale)
@@ -30,27 +30,7 @@
   };
 
   let ws;
-  // peers: Map<remoteID, {
-  //   id, name, state,
-  //   liWaiting, liConnected,
-  //   pc,
-  //   pendingCandidates: RTCIceCandidate[],
-  //   audioElementRemoteToStudio: HTMLAudioElement,
-  //   audioElementStudioToRemote: HTMLAudioElement,
-  //   metreCanvas: HTMLCanvasElement, metreContext: CanvasRenderingContext2D,
-  //   analyserL: AnalyserNode, analyserR: AnalyserNode, ppmPeak: number,
-  //   bitrateSelector: HTMLSelectElement,
-  //   bitrateCanvas: HTMLCanvasElement, bitrateContext: CanvasRenderingContext2D,
-  //   jitterCanvas: HTMLCanvasElement, jitterContext: CanvasRenderingContext2D,
-  //   stats: { lastBytes: number, lastTimestamp: number, bitrateData: number[], jitterData: number[] },
-  //   statsInterval: any,
-  //   routeSelector: HTMLSelectElement,
-  //   currentRouteSender: RTCRtpSender | null,
-  //   recordAnalyser: AnalyserNode | null,
-  //   recordWaveformCanvas: HTMLCanvasElement, recordWaveformCtx: CanvasRenderingContext2D,
-  //   muteBtn: HTMLButtonElement, kickBtn: HTMLButtonElement,
-  //   remoteMuted: boolean, localMuted: boolean
-  // }>
+  // peers: Map<remoteID, { ... }>
   const peers = new Map();
 
   // UI references
@@ -78,7 +58,7 @@
   let recordingStartTime = 0;
   let recordTimerInterval = null;
   const mediaRecorders = []; // array of MediaRecorder
-  let recordedBlobs = {};    // <=== Changed from const to let
+  let recordedBlobs = {};    // must be let so we can clear it
 
   /////////////////////////////////////////////////////
   // INITIALIZATION
@@ -526,7 +506,7 @@
     contributorListEl.appendChild(liConn);
     entry.liConnected = liConn;
 
-    // Ensure audio element exists before ontrack
+    // Ensure audio elements exist for ontrack
     if (!entry.audioElementRemoteToStudio) {
       const audioRemote = document.createElement('audio');
       audioRemote.id = `audio-remote-${remoteID}`;
@@ -536,8 +516,6 @@
       document.body.appendChild(audioRemote);
       entry.audioElementRemoteToStudio = audioRemote;
     }
-
-    // Ensure studio→remote audio element exists
     if (!entry.audioElementStudioToRemote) {
       const audioStudio = document.createElement('audio');
       audioStudio.id = `audio-studio-${remoteID}`;
@@ -627,11 +605,11 @@
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
       }
 
-      // ontrack: attach incoming remote→studio and possible additional tracks
+      // ontrack: attach incoming audio
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
 
-        // Ensure audioElementRemoteToStudio exists
+        // Ensure remote audio element exists
         if (!entry.audioElementRemoteToStudio) {
           const audioRemote = document.createElement('audio');
           audioRemote.id = `audio-remote-${remoteID}`;
@@ -642,22 +620,22 @@
           entry.audioElementRemoteToStudio = audioRemote;
         }
 
-        // First track: remote→studio
+        // First audio track: remote→studio
         if (!entry.audioElementRemoteToStudio.srcObject) {
           entry.audioElementRemoteToStudio.srcObject = incomingStream;
           setupRemotePPM(remoteID, incomingStream);
 
-          // For recording waveform: attach analyser
+          // Recording waveform analyser
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const src = audioCtx.createMediaStreamSource(incomingStream);
+          const srcNode = audioCtx.createMediaStreamSource(incomingStream);
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 2048;
-          src.connect(analyser);
+          srcNode.connect(analyser);
           entry.recordAnalyser = analyser;
         }
-        // If second audio track arrives (e.g. studio→remote echo or routed mix):
+        // Second audio track: studio→remote echo or routed mix
         else {
-          // Ensure audioElementStudioToRemote exists
+          // Ensure studio→remote audio element exists
           if (!entry.audioElementStudioToRemote) {
             const audioStudio = document.createElement('audio');
             audioStudio.id = `audio-studio-${remoteID}`;
@@ -673,7 +651,7 @@
         }
       };
 
-      // Send ICE candidates to remote
+      // ICE candidates
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
@@ -687,7 +665,7 @@
         }
       };
 
-      // Connection state updates: start/stop stats
+      // Connection state change
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
         entry.statusSpan.textContent = state;
@@ -729,7 +707,6 @@
       return;
     }
 
-    // Send answer
     ws.send(
       JSON.stringify({
         type: 'answer',
@@ -807,6 +784,9 @@
     const entry = peers.get(remoteID);
     if (!entry) return;
 
+    // Only proceed if metreCanvas exists
+    if (!entry.metreCanvas) return;
+
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
 
@@ -831,6 +811,7 @@
   function drawRemotePPM(remoteID) {
     const entry = peers.get(remoteID);
     if (!entry || !entry.analyserL || !entry.analyserR) return;
+    if (!entry.metreCanvas) return; // guard against null canvas
 
     const canvas = entry.metreCanvas;
     const ctx = entry.metreContext;
@@ -981,7 +962,7 @@
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
 
-        // Ensure audioElementRemoteToStudio exists
+        // Ensure remote audio element exists
         if (!entry.audioElementRemoteToStudio) {
           const audioRemote = document.createElement('audio');
           audioRemote.id = `audio-remote-${remoteID}`;
@@ -1007,7 +988,7 @@
         }
         // Second audio track: studio→remote echo or routed mix
         else {
-          // Ensure audioElementStudioToRemote exists
+          // Ensure studio→remote audio element exists
           if (!entry.audioElementStudioToRemote) {
             const audioStudio = document.createElement('audio');
             audioStudio.id = `audio-studio-${remoteID}`;
@@ -1144,150 +1125,9 @@
         }
       }
     }
-    return opusPayloadType && fmtMap.has(opusPayloadType) ? fmtMap.get(opusPayloadType) : null;
-  }
-
-  /////////////////////////////////////////////////////
-  // SETUP REMOTE PPM METER & RECORD WAVEFORM
-  /////////////////////////////////////////////////////
-  function setupRemotePPM(remoteID, stream) {
-    const entry = peers.get(remoteID);
-    if (!entry) return;
-
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = audioCtx.createMediaStreamSource(stream);
-
-    const splitter = audioCtx.createChannelSplitter(2);
-    src.connect(splitter);
-
-    const analyserL = audioCtx.createAnalyser();
-    analyserL.fftSize = 1024;
-    const analyserR = audioCtx.createAnalyser();
-    analyserR.fftSize = 1024;
-
-    splitter.connect(analyserL, 0);
-    splitter.connect(analyserR, 1);
-
-    entry.analyserL = analyserL;
-    entry.analyserR = analyserR;
-    entry.ppmPeak = 0;
-
-    drawRemotePPM(remoteID);
-  }
-
-  function drawRemotePPM(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry || !entry.analyserL || !entry.analyserR) return;
-
-    const canvas = entry.metreCanvas;
-    const ctx = entry.metreContext;
-    const width = canvas.width;
-    const height = canvas.height;
-
-    // Numeric scale (0.00 to 1.00)
-    ctx.fillStyle = '#fff';
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'center';
-    for (let i = 0; i <= 4; i++) {
-      const x = (i / 4) * width;
-      ctx.fillRect(x, height - 10, 1, 10);
-      const label = (i / 4).toFixed(2);
-      ctx.fillText(label, x, height - 12);
-    }
-
-    const bufferLength = entry.analyserL.fftSize;
-    const dataL = new Float32Array(bufferLength);
-    const dataR = new Float32Array(bufferLength);
-    entry.analyserL.getFloatTimeDomainData(dataL);
-    entry.analyserR.getFloatTimeDomainData(dataR);
-
-    let maxAmp = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const aL = Math.abs(dataL[i]);
-      const aR = Math.abs(dataR[i]);
-      if (aL > maxAmp) maxAmp = aL;
-      if (aR > maxAmp) maxAmp = aR;
-    }
-
-    entry.ppmPeak = maxAmp > entry.ppmPeak ? maxAmp : Math.max(entry.ppmPeak - 0.005, 0);
-
-    const levelWidth = maxAmp * width;
-    ctx.fillStyle = '#4caf50';
-    ctx.fillRect(0, 0, levelWidth, height - 12);
-
-    const peakX = entry.ppmPeak * width;
-    ctx.fillStyle = '#f44336';
-    ctx.fillRect(peakX - 1, 0, 2, height - 12);
-
-    requestAnimationFrame(() => drawRemotePPM(remoteID));
-  }
-
-  /////////////////////////////////////////////////////
-  // START STATS POLLING (Bitrate & Jitter)
-  /////////////////////////////////////////////////////
-  function startStats(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry || !entry.pc) return;
-    entry.stats = { lastBytes: 0, lastTimestamp: 0, bitrateData: [], jitterData: [] };
-    entry.statsInterval = setInterval(async () => {
-      const stats = await entry.pc.getStats();
-      stats.forEach((report) => {
-        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
-          const now = report.timestamp;
-          const bytes = report.bytesReceived;
-          if (entry.stats.lastTimestamp) {
-            const deltaBytes = bytes - entry.stats.lastBytes;
-            const deltaTime = (now - entry.stats.lastTimestamp) / 1000; // ms→s
-            const bitrate = (deltaBytes * 8) / deltaTime; // bps
-            entry.stats.bitrateData.push(bitrate / 1000); // kbps
-            if (entry.stats.bitrateData.length > 60) entry.stats.bitrateData.shift();
-          }
-          entry.stats.lastBytes = bytes;
-          entry.stats.lastTimestamp = now;
-          const jitter = report.jitter * 1000; // seconds→ms
-          entry.stats.jitterData.push(jitter);
-          if (entry.stats.jitterData.length > 60) entry.stats.jitterData.shift();
-        }
-      });
-      drawStatsGraphs(remoteID);
-    }, 1000);
-  }
-
-  function drawStatsGraphs(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry) return;
-
-    // Bitrate graph
-    const bCtx = entry.bitrateContext;
-    const bCanvas = entry.bitrateCanvas;
-    const width = bCanvas.width;
-    const height = bCanvas.height;
-    const data = entry.stats.bitrateData;
-
-    bCtx.clearRect(0, 0, width, height);
-    bCtx.strokeStyle = '#4caf50';
-    bCtx.beginPath();
-    data.forEach((val, i) => {
-      const x = (i / 59) * width;
-      const y = height - Math.min((val / 200) * height, height); // scale max 200 kbps
-      i === 0 ? bCtx.moveTo(x, y) : bCtx.lineTo(x, y);
-    });
-    bCtx.stroke();
-
-    // Jitter graph
-    const jCtx = entry.jitterContext;
-    const jCanvas = entry.jitterCanvas;
-    const jData = entry.stats.jitterData;
-
-    jCtx.clearRect(0, 0, width, height);
-    jCtx.strokeStyle = '#2196f3';
-    jCtx.beginPath();
-    jData.forEach((val, i) => {
-      const x = (i / 59) * width;
-      const y = height - Math.min((val / 100) * height, height); // scale max 100 ms
-      i === 0 ? jCtx.moveTo(x, y) : jCtx.lineTo(x, y);
-    });
-    jCtx.stroke();
+    return opusPayloadType && fmtMap.has(opusPayloadType)
+      ? fmtMap.get(opusPayloadType)
+      : null;
   }
 
   /////////////////////////////////////////////////////
@@ -1395,7 +1235,7 @@
     stopRecBtn.disabled = false;
 
     waveformsContainer.innerHTML = '';
-    recordedBlobs = {}; // <=== Clear recordedBlobs rather than reassigning a const
+    recordedBlobs = {}; // <=== Clear recordedBlobs
 
     recordingStartTime = Date.now();
     recordTimerEl.textContent = '00:00:00';
