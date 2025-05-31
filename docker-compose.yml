@@ -1,12 +1,11 @@
-version: '3.3'
+version: '3.8'
 
 services:
-  app:
+  webrtc-contrib:
     build: .
-    container_name: webrtc-radio-app
+    container_name: webrtc-contrib-app
     ports:
       - "3030:3030"
+    volumes:
+      - ./recordings:/usr/src/app/recordings
     restart: unless-stopped
-    environment:
-      - NODE_ENV=production
-    # No volumes for code; rebuild for changes

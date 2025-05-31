@@ -1,25 +1,42 @@
 /**
- * server.js (CommonJS)
- *
- * - WebSocket signaling server (using ws) on top of an Express app.
- * - Serves static files (studio.html, remote.html, recordings.html, etc.).
- * - Accepts uploads (multipart/form-data) at POST /upload and saves them under ./recordings/.
- * - Exposes GET /recordings to return a JSON list of stored recordings.
+ * server.js
+ * 
+ * Node.js signaling server for WebRTC remote audio contribution system.
+ * Uses Express to serve static files and Multer for file uploads.
+ * Uses ws (WebSocketServer) for WebRTC signaling.
  */
 
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
 const express = require('express');
+const http = require('http');
+const path = require('path');
+const fs = require('fs');
 const { WebSocketServer } = require('ws');
 const multer = require('multer');
 const cors = require('cors');
+const crypto = require('crypto');
 
-// Use __dirname directly (CommonJS)
+// Configuration
+const HTTP_PORT = process.env.PORT || 3030;
+const ALLOWED_ORIGIN = 'https://webrtc.brfm.net'; // Only accept WS from this origin
+
+// Create recordings directory if it doesn't exist
 const recordingsDir = path.join(__dirname, 'recordings');
 if (!fs.existsSync(recordingsDir)) {
   fs.mkdirSync(recordingsDir, { recursive: true });
 }
+
+const app = express();
+
+// CORS middleware to allow only from ALLOWED_ORIGIN for HTTP endpoints
+app.use(cors({
+  origin: ALLOWED_ORIGIN
+}));
+
+// Serve static files from public/
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve recordings statically at /recordings/<filename>
+app.use('/recordings', express.static(recordingsDir));
 
 // Multer setup for file uploads
 const storage = multer.diskStorage({
@@ -27,238 +44,237 @@ const storage = multer.diskStorage({
     cb(null, recordingsDir);
   },
   filename: (req, file, cb) => {
-    const timestamp = Date.now();
-    const safeName = file.originalname.replace(/\s+/g, '_');
-    cb(null, `${timestamp}_${safeName}`);
-  },
+    // Preserve original filename; in a real system, you might sanitize or add timestamps
+    cb(null, file.originalname);
+  }
 });
 const upload = multer({ storage });
 
-// Express app
-const app = express();
-app.use(cors());
-
-// Serve static frontend files from "public" directory
-const publicDir = path.join(__dirname, 'public');
-app.use(express.static(publicDir));
-
-// POST /upload – accept multipart files (field name "files")
+// POST /upload → accept multipart/form-data field name "files"
 app.post('/upload', upload.array('files'), (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: 'No files were uploaded.' });
-  }
-  const savedFiles = req.files.map((f) => f.filename);
-  return res.json({ uploaded: savedFiles });
+  // req.files is array of files
+  const uploadedFilenames = req.files.map(f => f.filename);
+  console.log(`Files uploaded: ${uploadedFilenames.join(', ')}`);
+  res.json({ uploaded: uploadedFilenames });
 });
 
-// GET /recordings – list all files in recordings directory
+// GET /recordings → list all files in recordings directory
 app.get('/recordings', (req, res) => {
   fs.readdir(recordingsDir, (err, files) => {
     if (err) {
       console.error('Error reading recordings directory:', err);
-      return res.status(500).json({ error: 'Could not list recordings.' });
+      return res.status(500).json({ error: 'Unable to list recordings' });
     }
-    return res.json({ recordings: files });
+    // Only include regular files
+    const recordings = files.filter(f => {
+      const fullPath = path.join(recordingsDir, f);
+      return fs.statSync(fullPath).isFile();
+    });
+    res.json({ recordings });
   });
 });
 
-// Serve individual recording files under /recordings/*
-app.use('/recordings', express.static(recordingsDir));
-
-// Create HTTP server and bind Express
+// Create HTTP server and attach Express
 const server = http.createServer(app);
 
-// WebSocket server (ws) attaches to the same HTTP server
-const wss = new WebSocketServer({ server });
+// --- WebSocket (Signaling) Setup ---
 
-// In‐memory store of connected clients
-const studios = new Set();
-const remotes = new Map(); // remoteId → { ws, name }
+// Create WebSocketServer attached to the same HTTP server
+const wss = new WebSocketServer({ noServer: true });
 
-// Broadcast to all studios
-function broadcastToStudios(obj) {
-  const msg = JSON.stringify(obj);
-  studios.forEach((clientWs) => {
-    if (clientWs.readyState === clientWs.OPEN) {
-      clientWs.send(msg);
+// In-memory sets/maps to track studios and remotes
+const studios = new Set(); // Set of ws for studio clients
+const remotes = new Map(); // Map remoteId → { ws, name }
+
+// Helper: broadcast a JSON message to all studios
+function broadcastToStudios(message) {
+  const data = JSON.stringify(message);
+  studios.forEach(studioWs => {
+    if (studioWs.readyState === studioWs.OPEN) {
+      studioWs.send(data);
     }
   });
 }
 
-// Send to a specific client
-function sendToClient(clientWs, obj) {
-  if (clientWs.readyState === clientWs.OPEN) {
-    clientWs.send(JSON.stringify(obj));
-  }
-}
-
-wss.on('connection', (ws, req) => {
-  // Only accept origin from https://webrtc.brfm.net
-  const origin = req.headers.origin;
-  if (origin !== 'https://webrtc.brfm.net') {
-    ws.close();
-    console.warn('Connection from disallowed origin:', origin);
+// Handle HTTP upgrade (for WebSocket)
+server.on('upgrade', (request, socket, head) => {
+  // Enforce WebSocket origin
+  const origin = request.headers.origin;
+  if (origin !== ALLOWED_ORIGIN) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    console.warn(`WebSocket connection rejected from origin: ${origin}`);
     return;
   }
+  wss.handleUpgrade(request, socket, head, ws => {
+    wss.emit('connection', ws, request);
+  });
+});
 
-  ws.on('message', (data) => {
+// On new WebSocket connection
+wss.on('connection', (ws, request) => {
+  // Track whether this ws is a studio or remote (set on 'join' message)
+  ws.isStudio = false;
+  ws._remoteId = null; // will store remoteId if a remote
+
+  console.log('New WebSocket connection');
+
+  ws.on('message', data => {
     let msg;
     try {
       msg = JSON.parse(data);
-    } catch (err) {
-      console.error('Invalid JSON:', err);
+    } catch (e) {
+      console.error('Invalid JSON received:', e);
       return;
     }
 
     switch (msg.type) {
       case 'join':
-        // { type:'join', role:'studio'|'remote', name? }
         if (msg.role === 'studio') {
+          ws.isStudio = true;
           studios.add(ws);
-          console.log('Studio joined.');
-          // Send existing remotes to this studio
-          remotes.forEach(({ name }, remoteId) => {
-            sendToClient(ws, {
-              type: 'new-remote',
-              id: remoteId,
-              name,
-            });
+          console.log('Studio joined');
+          // Send existing remotes to this new studio
+          remotes.forEach(({ name }, id) => {
+            ws.send(JSON.stringify({ type: 'new-remote', id, name }));
           });
         } else if (msg.role === 'remote') {
-          const remoteId = msg.id || require('crypto').randomUUID();
-          remotes.set(remoteId, { ws, name: msg.name });
-          console.log(`Remote joined: ${msg.name} (${remoteId})`);
-          broadcastToStudios({
-            type: 'new-remote',
-            id: remoteId,
-            name: msg.name,
-          });
+          // A new remote connecting
+          const displayName = msg.name || 'Unknown';
+          const remoteId = crypto.randomUUID();
           ws._remoteId = remoteId;
+          remotes.set(remoteId, { ws, name: displayName });
+          console.log(`Remote joined: ${displayName} (${remoteId})`);
+          // Send remote ID back to the connecting remote
+          ws.send(JSON.stringify({ type: 'joined', id: remoteId }));
+          // Inform all studios about new remote
+          broadcastToStudios({ type: 'new-remote', id: remoteId, name: displayName });
         }
         break;
 
       case 'ready-for-offer':
-        // { type:'ready-for-offer', target:<remoteId> }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, { type: 'start-call' });
-          }
+        // From studio; forward to specific remote
+        const targetRemote = remotes.get(msg.target);
+        if (targetRemote) {
+          targetRemote.ws.send(JSON.stringify({ type: 'start-call' }));
         }
         break;
 
       case 'offer':
-        // { type:'offer', from:'<remoteId>', sdp }
-        broadcastToStudios({
-          type: 'offer',
-          from: msg.from,
-          sdp: msg.sdp,
-        });
+        // From remote → broadcast to all studios
+        // msg: { type: "offer", from: "<remoteId>", sdp }
+        broadcastToStudios({ type: 'offer', from: msg.from, sdp: msg.sdp });
         break;
 
       case 'answer':
-        // { type:'answer', from:'studio', target:'<remoteId>', sdp }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, {
-              type: 'answer',
-              sdp: msg.sdp,
-            });
-          }
+        // From studio to remote
+        // msg: { type: "answer", from: "studio", target: "<remoteId>", sdp }
+        const remoteObj = remotes.get(msg.target);
+        if (remoteObj) {
+          remoteObj.ws.send(JSON.stringify({ type: 'answer', sdp: msg.sdp }));
         }
         break;
 
       case 'candidate':
-        // { type:'candidate', from:'<id>', target:'studio'|'remote', candidate }
+        // msg: { type: "candidate", from: "<id>", target: "studio"|"remote", candidate }
         if (msg.target === 'studio') {
-          broadcastToStudios({
-            type: 'candidate',
-            from: msg.from,
-            candidate: msg.candidate,
-          });
+          // Broadcast candidate from remote or studio to studios
+          broadcastToStudios({ type: 'candidate', from: msg.from, candidate: msg.candidate });
         } else if (msg.target === 'remote') {
-          const rData = remotes.get(msg.to);
-          if (rData) {
-            sendToClient(rData.ws, {
-              type: 'candidate',
-              candidate: msg.candidate,
-            });
+          const dest = remotes.get(msg.to);
+          if (dest) {
+            dest.ws.send(JSON.stringify({ type: 'candidate', candidate: msg.candidate }));
           }
         }
         break;
 
       case 'mute-remote':
-        // { type:'mute-remote', target:'<remoteId>' }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, {
-              type: 'mute-update',
-              muted: true,
-            });
-          }
+        // msg: { type: "mute-remote", target: "<remoteId>" }
+        const muteTarget = remotes.get(msg.target);
+        if (muteTarget) {
+          muteTarget.ws.send(JSON.stringify({ type: 'mute-update', muted: true }));
         }
         break;
 
       case 'kick-remote':
-        // { type:'kick-remote', target:'<remoteId>' }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, { type: 'kick' });
-            rData.ws.close();
-          }
+        // msg: { type: "kick-remote", target: "<remoteId>" }
+        const kickTarget = remotes.get(msg.target);
+        if (kickTarget) {
+          kickTarget.ws.send(JSON.stringify({ type: 'kick' }));
+          kickTarget.ws.close();
+          // will be cleaned up in 'close' handler
         }
         break;
 
       case 'mode-update':
-        // { type:'mode-update', mode:'speech'|'music', target:'<remoteId>' }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, {
-              type: 'mode-update',
-              mode: msg.mode,
-            });
-          }
+        // msg: { type: "mode-update", mode: "speech"|"music", target: "<remoteId>" }
+        const modeTarget = remotes.get(msg.target);
+        if (modeTarget) {
+          modeTarget.ws.send(JSON.stringify({ type: 'mode-update', mode: msg.mode }));
         }
         break;
 
       case 'bitrate-update':
-        // { type:'bitrate-update', bitrate:<number>, target:'<remoteId>' }
-        {
-          const rData = remotes.get(msg.target);
-          if (rData) {
-            sendToClient(rData.ws, {
-              type: 'bitrate-update',
-              bitrate: msg.bitrate,
-            });
+        // msg: { type: "bitrate-update", bitrate: <number>, target: "<remoteId>" }
+        const bitrateTarget = remotes.get(msg.target);
+        if (bitrateTarget) {
+          bitrateTarget.ws.send(JSON.stringify({ type: 'bitrate-update', bitrate: msg.bitrate }));
+        }
+        break;
+
+      // --- Chat handling (added for live chat feature) ---
+      case 'chat':
+        // msg: { type: "chat", fromRole: "studio"|"remote", fromId: "<id>", target: "studio"|"remote", targetId: "<id>", text: "<message>" }
+        if (msg.target === 'studio') {
+          // Broadcast chat to all studios
+          broadcastToStudios({ type: 'chat', fromRole: msg.fromRole, fromId: msg.fromId, text: msg.text });
+        } else if (msg.target === 'remote') {
+          const chatDest = remotes.get(msg.targetId);
+          if (chatDest) {
+            chatDest.ws.send(JSON.stringify({ type: 'chat', fromRole: msg.fromRole, fromId: msg.fromId, text: msg.text }));
           }
         }
         break;
 
+      // --- Sports goal handling ---
+      case 'goal':
+        // msg: { type: "goal", fromId: "<remoteId>", team: "<teamName>" }
+        // Forward to all studios
+        broadcastToStudios({ type: 'goal', fromId: msg.fromId, team: msg.team });
+        break;
+
+      case 'ack-goal':
+        // msg: { type: "ack-goal", targetId: "<remoteId>" }
+        const ackTarget = remotes.get(msg.targetId);
+        if (ackTarget) {
+          ackTarget.ws.send(JSON.stringify({ type: 'ack-goal' }));
+        }
+        break;
+
       default:
-        console.warn('Unknown message type from client:', msg.type);
+        console.warn('Unknown message type:', msg.type);
     }
   });
 
   ws.on('close', () => {
-    if (ws._remoteId) {
-      const remoteId = ws._remoteId;
-      remotes.delete(remoteId);
-      broadcastToStudios({
-        type: 'remote-disconnected',
-        id: remoteId,
-      });
-    } else {
+    if (ws.isStudio) {
       studios.delete(ws);
+      console.log('Studio disconnected');
+    } else if (ws._remoteId) {
+      const rid = ws._remoteId;
+      remotes.delete(rid);
+      console.log(`Remote disconnected: ${rid}`);
+      // Notify all studios
+      broadcastToStudios({ type: 'remote-disconnected', id: rid });
     }
+  });
+
+  ws.on('error', err => {
+    console.error('WebSocket error:', err);
   });
 });
 
-// Start HTTP + WebSocket server
-const PORT = process.env.PORT || 3030;
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+// Start HTTP+WS server
+server.listen(HTTP_PORT, () => {
+  console.log(`Server listening on port ${HTTP_PORT}`);
 });

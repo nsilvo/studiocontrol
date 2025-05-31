@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sports Remote</title>
+  <link rel="stylesheet" href="css/sports.css" />
+</head>
+<body>
+  <div id="container">
+    <div id="join-panel">
+      <h1>Join as Sports Remote</h1>
+      <div class="control-group">
+        <label for="reporter-input">Reporter Name:</label>
+        <input type="text" id="reporter-input" placeholder="Your Name" />
+      </div>
+      <div class="control-group">
+        <label for="teamA-input">Team A:</label>
+        <input type="text" id="teamA-input" placeholder="Team A Name" />
+      </div>
+      <div class="control-group">
+        <label for="teamB-input">Team B:</label>
+        <input type="text" id="teamB-input" placeholder="Team B Name" />
+      </div>
+      <button id="reporter-input-btn">Join</button>
+    </div>
+
+    <div id="main-panel" class="hidden">
+      <h1>Sports Remote Dashboard</h1>
+      <div id="status">Awaiting call...</div>
+
+      <div class="scoreboard">
+        <label for="scoreA">Score A:</label>
+        <input type="number" id="scoreA" value="0" />
+        <label for="scoreB">Score B:</label>
+        <input type="number" id="scoreB" value="0" />
+        <button id="goal-btn">Goal!</button>
+      </div>
+
+      <div class="control-group">
+        <button id="tone-toggle-btn">Start Test Tone</button>
+        <button id="mute-toggle-btn">Mute Mic</button>
+      </div>
+      <canvas id="ppm-meter"></canvas>
+
+      <div id="chat-container">
+        <h3>Chat</h3>
+        <div id="chat-messages"></div>
+        <input type="text" id="chat-input" placeholder="Type message..." />
+        <button id="chat-send-btn">Send</button>
+      </div>
+
+      <div id="segments-container">
+        <h3>Segment Recordings</h3>
+        <button id="start-segment-btn">Start Segment</button>
+        <button id="stop-segment-btn">Stop Segment</button>
+        <ul id="segments-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script src="js/sports.js"></script>
+</body>
+</html>

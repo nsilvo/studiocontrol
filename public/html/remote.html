@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Remote Interface</title>
+  <link rel="stylesheet" href="css/remote.css" />
+</head>
+<body>
+  <div id="container">
+    <div id="join-panel">
+      <h1>Join as Remote</h1>
+      <div class="control-group">
+        <label for="name-input">Display Name:</label>
+        <input type="text" id="name-input" placeholder="Your Name" />
+      </div>
+      <button id="join-btn">Join</button>
+    </div>
+
+    <div id="main-panel" class="hidden">
+      <h1>Remote Dashboard</h1>
+      <div id="status">Awaiting call from studio...</div>
+
+      <div class="control-group">
+        <button id="tone-toggle-btn">Start Test Tone</button>
+        <button id="mute-toggle-btn">Mute Mic</button>
+      </div>
+      <canvas id="ppm-meter"></canvas>
+
+      <div id="chat-container">
+        <h3>Chat</h3>
+        <div id="chat-messages"></div>
+        <input type="text" id="chat-input" placeholder="Type message..." />
+        <button id="chat-send-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script src="js/remote.js"></script>
+</body>
+</html>

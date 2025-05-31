@@ -1,16 +1,16 @@
 {
-  "name": "webrtc-radio-signaling",
+  "name": "webrtc-contrib",
   "version": "1.0.0",
-  "description": "WebRTC signaling server and front-end for professional radio station remote contributions",
+  "description": "WebRTC remote audio contribution system for professional radio station",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "ws": "^8.12.0",
-    "winston": "^3.8.2",
-    "winston-daily-rotate-file": "^4.7.1",
-    "uuid": "^9.0.0"
+    "ws": "^8.13.0",
+    "multer": "^1.4.5-lts.1",
+    "cors": "^2.8.5"
   }
 }
