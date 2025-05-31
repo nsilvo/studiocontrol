@@ -1,9 +1,10 @@
 /**
  * public/js/remote.js
- * 
+ *
  * JavaScript logic for the Remote interface.
  * - Prompts for name on load
  * - Connects via WebSocket, sends join as remote
+ * - Waits for 'joined' to get remoteId
  * - Waits for 'start-call' from studio, then sets up WebRTC
  * - Sends audio (mono or stereo) per instructions from studio
  * - Responds to 'mode-update', 'bitrate-update', 'mute-update', 'kick'
@@ -11,38 +12,41 @@
  */
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
-let ws;
-let remoteId = null;
-let displayName = null;
+let ws = null;
+let remoteId = null;           // Will be assigned by server
+let displayName = null;        // Entered by user
 
-let pc = null;
+let pc = null;                 // RTCPeerConnection
 let localStream = null;
 let audioSender = null;
 let audioCtx = null;
 let analyserNode = null;
-let meterCanvas = null;
+let hasLoggedBitrateChange = false; // so we only log bitrate once
 
 // Current settings
-let currentMode = 'speech'; // 'speech' or 'music'
-let currentBitrate = 16000; // in bps
+let currentMode = 'speech';    // 'speech' or 'music'
+let currentBitrate = 16000;    // in bps
 
 // UI elements
-const container = document.getElementById('container');
-const nameInput = document.getElementById('name-input');
-const joinBtn = document.getElementById('join-btn');
-const statusDiv = document.getElementById('status');
-const toneToggleBtn = document.getElementById('tone-toggle-btn');
-const muteToggleBtn = document.getElementById('mute-toggle-btn');
-const ppmCanvas = document.getElementById('ppm-meter');
-const chatBox = document.getElementById('chat-messages');
-const chatInput = document.getElementById('chat-input');
+const nameInput   = document.getElementById('name-input');
+const joinBtn     = document.getElementById('join-btn');
+const joinPanel   = document.getElementById('join-panel');
+const mainPanel   = document.getElementById('main-panel');
+const statusDiv   = document.getElementById('status');
+const toneToggleBtn  = document.getElementById('tone-toggle-btn');
+const muteToggleBtn  = document.getElementById('mute-toggle-btn');
+const ppmCanvas   = document.getElementById('ppm-meter');
+const chatBox     = document.getElementById('chat-messages');
+const chatInput   = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
 
 let isToneOn = false;
 let toneOsc = null;
 let toneGain = null;
 
-// Prompt for name and join
+// ──────── 1. JOIN FLOW ──────────────────────────────────────────────────────────
+
+// When "Join" is clicked: prompt for name, initialize WebSocket, switch panels
 joinBtn.addEventListener('click', () => {
   const name = nameInput.value.trim();
   if (!name) {
@@ -51,56 +55,85 @@ joinBtn.addEventListener('click', () => {
   }
   displayName = name;
   initializeWebSocket();
-  document.getElementById('join-panel').classList.add('hidden');
-  document.getElementById('main-panel').classList.remove('hidden');
-  statusDiv.textContent = 'Connecting...';
+  joinPanel.classList.add('hidden');
+  mainPanel.classList.remove('hidden');
+  statusDiv.textContent = 'Connecting to studio...';
 });
 
 function initializeWebSocket() {
   ws = createReconnectingWebSocket(WS_URL);
+
   ws.onMessage(msg => {
     switch (msg.type) {
       case 'joined':
+        // Server replied with our assigned remoteId
         remoteId = msg.id;
         console.log('Assigned remoteId:', remoteId);
+        statusDiv.textContent = `🔑 Remote ID set. Waiting for studio to call.`;
         break;
+
       case 'start-call':
-        statusDiv.textContent = 'Starting call...';
+        // Only start WebRTC after joined
+        if (!remoteId) {
+          console.error('Received start-call before joined. Waiting for "joined" first.');
+          return;
+        }
+        statusDiv.textContent = 'Starting call with studio...';
         startCall();
         break;
+
       case 'answer':
         handleAnswer(msg.sdp);
         break;
+
       case 'candidate':
         handleCandidate(msg.candidate);
         break;
+
       case 'mode-update':
         handleModeUpdate(msg.mode);
         break;
+
       case 'bitrate-update':
         handleBitrateUpdate(msg.bitrate);
         break;
+
       case 'mute-update':
         handleMuteUpdate(msg.muted);
         break;
+
       case 'kick':
-        alert('You have been kicked by the studio.');
+        alert('❌ You have been kicked by the studio.');
         ws.close();
         break;
+
       case 'chat':
-        appendChatMessage(msg.fromRole, msg.text);
+        appendChatMessage(msg.fromId || 'Studio', msg.text);
         break;
+
       default:
-        console.warn('Remote received unknown message:', msg);
+        // Ignore "joined" here because we've already handled it,
+        // and do not complain about unknown messages anymore.
+        break;
     }
   });
+
+  ws.onClose = () => {
+    statusDiv.textContent = 'WebSocket closed. Reconnecting in 5 seconds...';
+    console.warn('WebSocket closed. Will attempt reconnect in 5s.');
+    // createReconnectingWebSocket will already attempt to reconnect,
+    // so we just update the status.
+  };
+
+  // First message: tell server “I want to join as remote”
   ws.send({ type: 'join', role: 'remote', name: displayName });
 }
 
-// Start WebRTC call: getUserMedia, create offer, send to studio
+// ──────── 2. WEBRTC CALL SETUP ─────────────────────────────────────────────────
+
 async function startCall() {
   try {
-    // Get microphone with channel count based on mode
+    // 2.1 Get userMedia with correct channel count (mono=1 for speech, stereo=2 for music)
     const constraints = {
       audio: {
         channelCount: currentMode === 'music' ? 2 : 1,
@@ -112,14 +145,15 @@ async function startCall() {
     localStream = await navigator.mediaDevices.getUserMedia(constraints);
     setupPPMMeter(localStream);
 
+    // 2.2 Create RTCPeerConnection
     pc = new RTCPeerConnection(getRTCConfig());
 
-    // Add audio track(s)
+    // 2.3 Add our audio tracks to the peer connection
     localStream.getTracks().forEach(track => {
       audioSender = pc.addTrack(track, localStream);
     });
 
-    // Handle ICE candidates
+    // 2.4 When ICE candidates are found, send them to the studio
     pc.onicecandidate = event => {
       if (event.candidate) {
         ws.send({
@@ -131,88 +165,95 @@ async function startCall() {
       }
     };
 
-    // Create offer
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: false,
-      offerToReceiveVideo: false
-    });
+    // 2.5 Create an SDP offer
+    const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    ws.send({ type: 'offer', from: remoteId, sdp: offer.sdp });
-    statusDiv.textContent = 'Offer sent, waiting for answer...';
 
-    // Handle remote tracks if needed (e.g., for two-way audio; not required here)
+    // 2.6 Send that SDP offer to the studio
+    ws.send({
+      type: 'offer',
+      from: remoteId,
+      sdp: offer.sdp
+    });
 
+    statusDiv.textContent = 'Offer sent. Awaiting answer...';
   } catch (err) {
-    console.error('Error in startCall:', err);
-    statusDiv.textContent = 'Error starting call.';
+    console.error('Error during startCall():', err);
+    statusDiv.textContent = '❌ Error starting call. See console.';
   }
 }
 
 async function handleAnswer(sdp) {
   if (!pc) {
-    console.error('No RTCPeerConnection exists.');
+    console.error('handleAnswer() called but RTCPeerConnection is null.');
     return;
   }
-  await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-  statusDiv.textContent = 'Call established.';
-}
-
-// Handle incoming ICE candidate from studio
-async function handleCandidate(candidate) {
-  if (pc) {
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) {
-      console.error('Error adding remote ICE candidate:', e);
-    }
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+    statusDiv.textContent = '✅ Call established with studio.';
+  } catch (err) {
+    console.error('Error setting remote description:', err);
   }
 }
 
-// Handle mode updates (speech vs. music)
+async function handleCandidate(candidate) {
+  if (!pc) {
+    console.error('handleCandidate() called but RTCPeerConnection is null.');
+    return;
+  }
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  } catch (e) {
+    console.error('Error adding ICE candidate:', e);
+  }
+}
+
+// ──────── 3. HANDLE UPDATES FROM STUDIO ────────────────────────────────────────
+
 function handleModeUpdate(mode) {
   currentMode = mode;
-  if (pc && audioSender) {
-    // Apply channelCount constraint by renegotiating? Many browsers don't support changing channelCount on the fly.
-    // Instead, we can quietly ignore or instruct user to reconnect. For simplicity, we'll log.
-    console.log(`Mode changed to ${mode}. For full effect, please reconnect.`);
-  }
+  console.log(`Mode updated by studio: ${mode}`);
+  statusDiv.textContent = `Mode changed to ${mode}. To apply channel change, reconnect.`;
 }
 
-// Handle bitrate updates
 async function handleBitrateUpdate(bitrate) {
   currentBitrate = bitrate;
   if (audioSender) {
     const params = audioSender.getParameters();
-    if (!params.encodings) params.encodings = [{}];
+    if (!params.encodings || !params.encodings.length) {
+      params.encodings = [{}];
+    }
     params.encodings[0].maxBitrate = bitrate;
     try {
       await audioSender.setParameters(params);
-      console.log(`Updated max bitrate to ${bitrate}.`);
+      if (!hasLoggedBitrateChange) {
+        console.log(`Audio bitrate set to ${bitrate} bps`);
+        hasLoggedBitrateChange = true;
+      }
     } catch (e) {
       console.warn('Failed to set bitrate parameters:', e);
     }
   }
 }
 
-// Handle mute/unmute from studio
 function handleMuteUpdate(muted) {
   if (localStream) {
-    localStream.getAudioTracks().forEach(t => {
-      t.enabled = !muted;
-    });
-    statusDiv.textContent = muted ? 'You have been muted.' : 'You have been unmuted.';
+    localStream.getAudioTracks().forEach(t => (t.enabled = !muted));
+    statusDiv.textContent = muted
+      ? '🔇 You have been muted by the studio.'
+      : '🔈 You have been unmuted by the studio.';
   }
 }
 
-// Append chat message to UI
+// ──────── 4. CHAT ─────────────────────────────────────────────────────────────
+
 function appendChatMessage(sender, text) {
-  const msg = document.createElement('div');
-  msg.textContent = `[${sender}]: ${text}`;
-  chatBox.appendChild(msg);
+  const msgEl = document.createElement('div');
+  msgEl.textContent = `[${sender}]: ${text}`;
+  chatBox.appendChild(msgEl);
   chatBox.scrollTop = chatBox.scrollHeight;
 }
 
-// Chat sending
 chatSendBtn.addEventListener('click', () => {
   const text = chatInput.value.trim();
   if (!text) return;
@@ -227,25 +268,28 @@ chatSendBtn.addEventListener('click', () => {
   chatInput.value = '';
 });
 
-// GLITS test tone
+// ──────── 5. GLITS TEST TONE & MUTE TOGGLE ────────────────────────────────────
+
 toneToggleBtn.addEventListener('click', () => {
   if (!audioCtx) audioCtx = new AudioContext();
   if (!isToneOn) {
     toneOsc = audioCtx.createOscillator();
     toneGain = audioCtx.createGain();
-    toneOsc.frequency.value = 1000; // 1 kHz
-    toneGain.gain.value = 0.1; // lower volume
+    toneOsc.frequency.value = 1000; // 1 kHz birdie tone
+    toneGain.gain.value = 0.1;       // low volume
     toneOsc.connect(toneGain).connect(audioCtx.destination);
     toneOsc.start();
-    // Also send tone through peer (replace mic)
+
+    // Replace microphone track with tone track in the peer connection
     if (audioSender) {
-      const toneStream = audioCtx.createMediaStreamDestination();
+      const toneDestination = audioCtx.createMediaStreamDestination();
       const osc = audioCtx.createOscillator();
       osc.frequency.value = 1000;
-      osc.connect(toneStream);
+      osc.connect(toneDestination);
       osc.start();
-      audioSender.replaceTrack(toneStream.stream.getAudioTracks()[0]);
+      audioSender.replaceTrack(toneDestination.stream.getAudioTracks()[0]);
     }
+
     toneToggleBtn.textContent = 'Stop Test Tone';
     isToneOn = true;
   } else {
@@ -261,7 +305,6 @@ toneToggleBtn.addEventListener('click', () => {
   }
 });
 
-// Mute/Unmute local mic (UI)
 muteToggleBtn.addEventListener('click', () => {
   if (!localStream) return;
   const track = localStream.getAudioTracks()[0];
@@ -269,61 +312,17 @@ muteToggleBtn.addEventListener('click', () => {
   muteToggleBtn.textContent = track.enabled ? 'Mute Mic' : 'Unmute Mic';
 });
 
-// Setup local PPM meter
+// ──────── 6. LOCAL PPM METER ──────────────────────────────────────────────────
+
 function setupPPMMeter(stream) {
   if (!audioCtx) audioCtx = new AudioContext();
   const source = audioCtx.createMediaStreamSource(stream);
   analyserNode = createPPMMeter(audioCtx, source, ppmCanvas);
 }
 
-// Auto-reconnect WebSocket: we assign a temporary remoteId once we receive it
-ws = {
-  send: () => {},
-  close: () => {}
-};
+// ──────── 7. CLEANUP ON UNLOAD ────────────────────────────────────────────────
 
-// On initial load, wait for WebSocket open to set remoteId
-// But we don't know remoteId until server assigns it upon join. We'll capture it via first response.
-initializeWebSocket = () => {
-  ws = createReconnectingWebSocket(WS_URL);
-  ws.onMessage(msg => {
-    if (msg.type === 'joined') {
-      remoteId = msg.id;
-      console.log('Assigned remoteId:', remoteId);
-    } else {
-      switch (msg.type) {
-        case 'start-call':
-          statusDiv.textContent = 'Starting call...';
-          startCall();
-          break;
-        case 'answer':
-          handleAnswer(msg.sdp);
-          break;
-        case 'candidate':
-          handleCandidate(msg.candidate);
-          break;
-        case 'mode-update':
-          handleModeUpdate(msg.mode);
-          break;
-        case 'bitrate-update':
-          handleBitrateUpdate(msg.bitrate);
-          break;
-        case 'mute-update':
-          handleMuteUpdate(msg.muted);
-          break;
-        case 'kick':
-          alert('You have been kicked by the studio.');
-          ws.close();
-          break;
-        case 'chat':
-          appendChatMessage(msg.fromRole, msg.text);
-          break;
-        default:
-          console.warn('Remote received unknown message:', msg);
-      }
-    }
-  });
-  ws.send({ type: 'join', role: 'remote', name: displayName });
-};
-
-// Modify server to send { type: "joined", id: remoteId } back to the remote when it joins.
+window.addEventListener('beforeunload', () => {
+  if (pc) pc.close();
+  if (ws) ws.close();
+});
