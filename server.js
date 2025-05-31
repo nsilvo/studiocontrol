@@ -7,6 +7,7 @@
  * - Serves static files from `public/`
  * - Handles WebSocket signaling between studios and remotes
  * - Implements file‐upload endpoints with multer
+ * - Ignores “keepalive” messages
  */
 
 const express = require('express');
@@ -121,7 +122,6 @@ wss.on('connection', (ws, request) => {
     const { type } = msg;
 
     switch (type) {
-      // ---------------------------
       case 'join':
         if (msg.role === 'studio') {
           ws.isStudio = true;
@@ -146,14 +146,12 @@ wss.on('connection', (ws, request) => {
               studioWs.send(payload);
             }
           });
-          // Inform remote of assigned ID (optional if using "joined")
+          // Inform remote of assigned ID
           ws.send(JSON.stringify({ type: 'id-assigned', id: remoteId }));
         }
         break;
 
-      // ---------------------------
       case 'ready-for-offer':
-        // From studio → pick a remoteId
         {
           const targetId = msg.target;
           const remoteEntry = remotes.get(targetId);
@@ -164,9 +162,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'offer':
-        // From remote: { type:'offer', from:remoteId, sdp }
         {
           const fromId = msg.from;
           const sdp = msg.sdp;
@@ -179,9 +175,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'answer':
-        // From studio: { type:'answer', from:'studio', target:remoteId, sdp }
         {
           const targetId = msg.target;
           const sdp = msg.sdp;
@@ -193,16 +187,13 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'candidate':
-        // { type:'candidate', from:'<id>', target:'studio'|'remote', candidate }
         {
           const fromId = msg.from;
           const target = msg.target;
           const candidate = msg.candidate;
 
           if (target === 'studio') {
-            // Broadcast to all studios
             const payload = JSON.stringify({ type: 'candidate', from: fromId, candidate });
             studios.forEach((studioWs) => {
               if (studioWs.readyState === studioWs.OPEN) {
@@ -210,7 +201,7 @@ wss.on('connection', (ws, request) => {
               }
             });
           } else if (target === 'remote') {
-            const targetId = msg.targetId || msg.to; // support either field
+            const targetId = msg.targetId || msg.to;
             const remoteEntry = remotes.get(targetId);
             if (remoteEntry && remoteEntry.ws.readyState === remoteEntry.ws.OPEN) {
               const payload = JSON.stringify({ type: 'candidate', candidate });
@@ -220,9 +211,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'mute-remote':
-        // From studio: { type:'mute-remote', target:remoteId }
         {
           const targetId = msg.target;
           const remoteEntry = remotes.get(targetId);
@@ -233,9 +222,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'kick-remote':
-        // From studio: { type:'kick-remote', target:remoteId }
         {
           const targetId = msg.target;
           const remoteEntry = remotes.get(targetId);
@@ -243,14 +230,11 @@ wss.on('connection', (ws, request) => {
             const payload = JSON.stringify({ type: 'kick' });
             remoteEntry.ws.send(payload);
             remoteEntry.ws.close();
-            // Removal will happen in 'close' handler
           }
         }
         break;
 
-      // ---------------------------
       case 'mode-update':
-        // From studio: { type:'mode-update', mode:'speech'|'music', target:remoteId }
         {
           const targetId = msg.target;
           const mode = msg.mode;
@@ -262,9 +246,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'bitrate-update':
-        // From studio: { type:'bitrate-update', bitrate:<number>, target:remoteId }
         {
           const targetId = msg.target;
           const bitrate = msg.bitrate;
@@ -276,10 +258,7 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'mute-update':
-        // From remote: { type:'mute-update', from:remoteId, target:'studio', muted:<bool> }
-        // Forward to all studios so they can update UI if desired
         {
           const fromId = msg.from;
           const muted = msg.muted;
@@ -292,15 +271,12 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
       case 'chat':
-        // { type:'chat', fromId:'<id>', name:'<displayName>', text:'<msg>', target:'studio'|'all' }
         {
           const text = msg.text;
           const name = msg.name || msg.fromId || 'Unknown';
           const target = msg.target;
           if (target === 'studio') {
-            // Forward to all studios
             const payload = JSON.stringify({ type: 'chat', fromId: msg.fromId, name, text });
             studios.forEach((studioWs) => {
               if (studioWs.readyState === studioWs.OPEN) {
@@ -308,7 +284,6 @@ wss.on('connection', (ws, request) => {
               }
             });
           } else if (target === 'all') {
-            // Broadcast from studio → all remotes
             const payload = JSON.stringify({ type: 'chat', fromId: msg.fromId, name, text });
             remotes.forEach(({ ws: remoteWs }) => {
               if (remoteWs.readyState === remoteWs.OPEN) {
@@ -319,7 +294,10 @@ wss.on('connection', (ws, request) => {
         }
         break;
 
-      // ---------------------------
+      case 'keepalive':
+        // No action needed—keep the WebSocket alive
+        break;
+
       default:
         console.warn('Unknown message type:', type);
         break;
@@ -334,7 +312,6 @@ wss.on('connection', (ws, request) => {
       const rid = ws._remoteId;
       remotes.delete(rid);
       console.log(`Remote ${rid} disconnected.`);
-      // Notify studios
       const payload = JSON.stringify({ type: 'remote-disconnected', id: rid });
       studios.forEach((studioWs) => {
         if (studioWs.readyState === studioWs.OPEN) {
@@ -342,6 +319,9 @@ wss.on('connection', (ws, request) => {
         }
       });
     }
+    // On close, there’s no need to explicitly stop keepalive here,
+    // because when we call ws.close() on the client side, they already
+    // stopKeepalive() in their onclose handler.
   });
 
   ws.on('error', (err) => {

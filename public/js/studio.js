@@ -8,6 +8,7 @@
  *     • Creates a 250×150 remote‐entry card with Call, Mute/Unmute, Mode, BitrateSelect, Toggle Stats.
  * - Single global chat → broadcast to all remotes.
  * - Recording controls remain unchanged.
+ * - WebSocket keepalives every 30s to avoid idle‐timeout drops.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -69,14 +70,17 @@ document.addEventListener('DOMContentLoaded', () => {
   function drawStudioVuMeter() {
     if (!studioAnalyser) return;
     studioAnalyser.getByteFrequencyData(studioRMSData);
+    // Compute RMS of entire spectrum
     let sum = 0;
     for (let i = 0; i < studioRMSData.length; i++) {
       sum += studioRMSData[i] * studioRMSData[i];
     }
-    const rms = Math.sqrt(sum / studioRMSData.length) / 255; // [0..1]
+    const rms = Math.sqrt(sum / studioRMSData.length) / 255; // 0..1
 
+    // Clear
     studioVuCtx.clearRect(0, 0, hVuWidth, hVuHeight);
 
+    // Draw 10 horizontal segments (left-to-right). Fill those ≤ RMS.
     const segments = 10;
     const segWidth = hVuWidth / segments;
     for (let i = 0; i < segments; i++) {
@@ -112,10 +116,14 @@ document.addEventListener('DOMContentLoaded', () => {
     remoteMixer.gain.value = 1.0;
     remoteAnalyser = remoteAudioContext.createAnalyser();
     remoteAnalyser.fftSize = 256;
+
+    // ──▶ Connect mixer to audio output (so studio hears remotes) and analyser (for VU)
+    remoteMixer.connect(remoteAudioContext.destination);
     remoteMixer.connect(remoteAnalyser);
+
     remoteRMSData = new Uint8Array(remoteAnalyser.frequencyBinCount);
     requestAnimationFrame(drawRemoteMixVuMeter);
-    console.log('[studio] Remote mix VU meter initialized');
+    console.log('[studio] Remote mix VU meter initialized (and connected to speakers)');
   }
 
   function drawRemoteMixVuMeter() {
@@ -125,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
     for (let i = 0; i < remoteRMSData.length; i++) {
       sum += remoteRMSData[i] * remoteRMSData[i];
     }
-    const rms = Math.sqrt(sum / remoteRMSData.length) / 255; // [0..1]
+    const rms = Math.sqrt(sum / remoteRMSData.length) / 255; // 0..1
 
     remoteMixVuCtx.clearRect(0, 0, hVuWidth, hVuHeight);
 
@@ -174,6 +182,7 @@ document.addEventListener('DOMContentLoaded', () => {
   chatSendBtnAll.onclick = () => {
     const text = chatInputAll.value.trim();
     if (!text) return;
+    // Broadcast to ALL remotes
     ws.send(
       JSON.stringify({
         type: 'chat',
@@ -198,6 +207,8 @@ document.addEventListener('DOMContentLoaded', () => {
       console.log('[studio] WS opened');
       connStatusSpan.textContent = 'Connected';
       ws.send(JSON.stringify({ type: 'join', role: 'studio', studioId: window.STUDIO_ID || 'Studio' }));
+      // Start keepalives every 30 seconds
+      startKeepalive();
     };
 
     ws.onmessage = (evt) => {
@@ -214,6 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ws.onclose = () => {
       console.warn('[studio] WS closed. Reconnecting in 5s…');
       connStatusSpan.textContent = 'Disconnected. Reconnecting…';
+      stopKeepalive();
       setTimeout(initWebSocket, 5000);
 
       // Tear down all peers + remove remote meters/cards
@@ -246,7 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
         teardownPeer(msg.id);
         break;
       case 'chat': {
-        // Display remote’s displayName (msg.name) if provided; else fallback to UUID
+        // Display remote’s displayName (msg.name) if present, else fallback to UUID
         const sender = msg.name || msg.fromId || 'Remote';
         appendGlobalChatMessage(sender, msg.text);
         break;

@@ -16,10 +16,7 @@
  *
  * - PPM meter displays two bars (left + right).
  *
- * - The “Send GLITS Tone” button now simply switches the gains:
- *     • micGain = 0, toneGain = amplitude  (tone on)
- *     • micGain = 1, toneGain = 0          (tone off)
- *   ensuring the tone goes through the same compressor as the mic.
+ * - WebSocket keepalives every 30s to avoid idle‐timeout drops.
  */
 
 (() => {
@@ -74,6 +71,25 @@
 
   let analyserL = null;
   let analyserR = null;
+
+  // ────────────────────────────────────────────────────────────────────────
+  // KEEPALIVE LOGIC
+  let keepaliveIntervalId = null;
+  function startKeepalive() {
+    if (keepaliveIntervalId) return;
+    keepaliveIntervalId = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'keepalive' }));
+      }
+    }, 30000);
+  }
+  function stopKeepalive() {
+    if (keepaliveIntervalId) {
+      clearInterval(keepaliveIntervalId);
+      keepaliveIntervalId = null;
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
 
   /////////////////////////////////////////////////////
   // Step 1: Prompt for name
@@ -144,7 +160,10 @@
           name: displayName,
         })
       );
+      // Start sending keepalives every 30 seconds
+      startKeepalive();
     };
+
     ws.onmessage = (evt) => {
       let msg;
       try {
@@ -155,9 +174,12 @@
       }
       handleSignalingMessage(msg);
     };
+
     ws.onclose = () => {
       console.warn('[remote] WS closed. Reconnecting in 5 seconds...');
       statusSpan.textContent = 'Disconnected (WS)';
+      // Stop keepalives
+      stopKeepalive();
       setTimeout(initWebSocket, 5000);
       if (pc) {
         pc.close();
@@ -171,6 +193,7 @@
         toneBtn.disabled = true;
       }
     };
+
     ws.onerror = (err) => {
       console.error('[remote] WS error:', err);
       ws.close();
@@ -447,7 +470,6 @@
     }
 
     // 3) Rebuild audio graph: connect new micSource → micGain → merger → compressor
-    //    (We keep the same AudioContext and compressor; just reconnect micGain → new source)
     const micSource = audioContext.createMediaStreamSource(micStream);
     micGain.disconnect();
     micSource.connect(micGain);
@@ -756,7 +778,7 @@
 
   /////////////////////////////////////////////////////
   // Send chat
-  /////////////////////////////////////////////////////
+  //////////////////////////////////////////////////###
   function sendChat() {
     const text = chatInputEl.value.trim();
     if (!text) return;
