@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Remote Contributor Interface</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Remote Contributor</h1>
+  </header>
+
+  <div class="container" id="setup-section">
+    <div class="section">
+      <h2>Enter Your Name to Connect</h2>
+      <input type="text" id="nameInput" placeholder="Your Name" />
+      <button id="connectBtn">Connect</button>
+    </div>
+  </div>
+
+  <div class="container" id="remote-ui" style="display: none;">
+    <!-- Section: Controls -->
+    <div class="section" id="controls-section">
+      <h2>Controls</h2>
+      <button id="muteSelfBtn">Mute</button>
+      <button id="toneBtn">Send Tone</button>
+      <span id="connStatus">Not connected</span>
+    </div>
+
+    <!-- Section: Audio Meter -->
+    <div class="section">
+      <h2>Your Audio Level</h2>
+      <canvas id="meter-canvas" class="meter-canvas" width="100" height="20"></canvas>
+    </div>
+
+    <!-- Section: Chat -->
+    <div class="section">
+      <h2>Chat with Studio</h2>
+      <div class="chat-window" id="chatWindow"></div>
+      <input type="text" id="chatInput" placeholder="Type message..." />
+      <button id="sendChatBtn">Send</button>
+    </div>
+  </div>
+
+  <script src="remote.js"></script>
+</body>
+</html>

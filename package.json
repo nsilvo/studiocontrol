@@ -1,0 +1,16 @@
+{
+  "name": "webrtc-radio-signaling",
+  "version": "1.0.0",
+  "description": "WebRTC signaling server and front-end for professional radio station remote contributions",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.12.0",
+    "winston": "^3.8.2",
+    "winston-daily-rotate-file": "^4.7.1",
+    "uuid": "^9.0.0"
+  }
+}

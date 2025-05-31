@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Studio Control Interface</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Studio Control Interface</h1>
+  </header>
+
+  <div class="container">
+    <!-- Section: Connected Contributors -->
+    <div class="section" id="contributors-section">
+      <h2>Connected Contributors</h2>
+      <ul id="contributors-list"></ul>
+    </div>
+
+    <!-- Section: Chat -->
+    <div class="section" id="chat-section">
+      <h2>Studio Chat</h2>
+      <div class="chat-window" id="chatWindow"></div>
+      <input type="text" id="chatInput" placeholder="Type message..." />
+      <button id="sendChatBtn">Send</button>
+    </div>
+  </div>
+
+  <!-- Include the signaling and WebRTC logic -->
+  <script src="studio.js"></script>
+</body>
+</html>
