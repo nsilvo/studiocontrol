@@ -2,188 +2,138 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Sports Remote Interface</title>
+  <title>Sports Remote Contributor</title>
   <link rel="stylesheet" href="css/style.css" />
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f4f4f4;
-      margin: 0;
-      padding: 0;
-    }
-    header {
-      background: #333;
-      color: #fff;
-      padding: 10px 20px;
-    }
-    header h1 {
-      margin: 0;
-      font-size: 1.5em;
-    }
-    .container {
+    /* Additional sports-specific styles */
+    #sportsHeader {
       max-width: 800px;
       margin: 20px auto;
-      background: #fff;
-      padding: 20px;
-      border-radius: 5px;
+      padding: 12px;
+      background: var(--card-bg);
+      border-radius: 8px;
+      box-shadow: var(--card-shadow);
     }
-    .section {
-      margin-bottom: 20px;
+    #sportsHeader .flex-row {
+      align-items: center;
+      justify-content: space-between;
     }
-    .section h2 {
-      margin-top: 0;
-      font-size: 1.2em;
+    #teamInfo, #scoreBoard {
+      margin-top: 12px;
     }
-    .form-group {
-      margin-bottom: 10px;
-    }
-    .form-group label {
-      display: inline-block;
-      width: 120px;
+    #scoreBoard {
+      font-size: 1.2rem;
       font-weight: bold;
     }
-    .form-group input {
-      padding: 5px;
-      width: 200px;
-    }
-    .button-group {
-      margin-top: 10px;
-    }
-    button {
-      padding: 8px 12px;
-      margin-right: 10px;
-      border: none;
-      background: #007bff;
+    #goalIndicator {
+      display: none;
+      padding: 8px;
+      background: var(--meter-red);
       color: #fff;
-      border-radius: 3px;
-      cursor: pointer;
+      text-align: center;
+      margin-top: 12px;
+      border-radius: 4px;
+      animation: blink 1s infinite;
     }
-    button:hover {
-      background: #0056b3;
+    @keyframes blink {
+      0%, 50%, 100% { opacity: 1; }
+      25%, 75% { opacity: 0; }
     }
-    button:disabled {
-      background: #999;
-      cursor: not-allowed;
+    #localRecordLinks {
+      margin-top: 12px;
     }
-    .meter-canvas {
-      border: 1px solid #555;
-      background: #333;
-      display: block;
-      width: 100%;
-      height: 20px;
-      margin-top: 10px;
-    }
-    .chat-window {
-      height: 150px;
-      overflow-y: auto;
-      border: 1px solid #ccc;
-      background: #fafafa;
-      padding: 10px;
-      margin-bottom: 10px;
-    }
-    .chat-message {
-      margin-bottom: 5px;
-    }
-    .record-controls {
-      margin-top: 10px;
-    }
-    .segment-player {
-      margin-top: 10px;
-    }
-    #bitrateSelector {
-      margin-left: 10px;
-    }
-    #connStatus {
-      font-weight: bold;
-      margin-left: 10px;
+    .btn-small {
+      padding: 6px 12px;
+      font-size: 0.9rem;
     }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Sports Remote Interface</h1>
-  </header>
-
-  <div class="container" id="setup-section">
-    <div class="section">
-      <h2>Enter Your Details to Connect</h2>
-      <div class="form-group">
-        <label for="reporterNameInput">Reporter Name:</label>
-        <input type="text" id="reporterNameInput" placeholder="e.g. John Doe" />
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 1) Header: Join Steps (Reporter Name, Teams)                 -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <div id="name-step" class="card" style="max-width: 500px; margin: 40px auto;">
+    <h2>Join as Sports Reporter</h2>
+    <div class="flex-col gap-8">
+      <div class="flex-col gap-4">
+        <label for="reporterNameInput">Your Name:</label>
+        <input id="reporterNameInput" type="text" placeholder="Reporter Name" />
       </div>
-      <div class="form-group">
-        <label for="teamAInput">Team A:</label>
-        <input type="text" id="teamAInput" placeholder="Home Team" />
+      <div id="teamInfo" class="flex-col gap-4">
+        <div class="flex-col gap-4">
+          <label for="teamAInput">Team A Name:</label>
+          <input id="teamAInput" type="text" placeholder="Team A" />
+        </div>
+        <div class="flex-col gap-4">
+          <label for="teamBInput">Team B Name:</label>
+          <input id="teamBInput" type="text" placeholder="Team B" />
+        </div>
       </div>
-      <div class="form-group">
-        <label for="teamBInput">Team B:</label>
-        <input type="text" id="teamBInput" placeholder="Away Team" />
-      </div>
-      <button id="connectBtn">Connect</button>
+      <button id="nameSubmitBtn" class="btn">Join</button>
     </div>
   </div>
 
-  <div class="container" id="sports-ui" style="display: none;">
-    <!-- CONTROLS SECTION -->
-    <div class="section">
-      <h2>Controls & Status</h2>
-      <button id="muteSelfBtn">Mute Myself</button>
-      <button id="toneBtn">Send GLITS Tone</button>
-      <button id="listenStudioBtn">Listen to Studio</button>
-      <span id="connStatus">Not connected</span>
-      <br /><br />
-      <label for="bitrateSelector">Audio Quality:</label>
-      <select id="bitrateSelector">
-        <option value="32000">Voice (32 kbps)</option>
-        <option value="64000">Standard (64 kbps)</option>
-        <option value="128000">High (128 kbps)</option>
-      </select>
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <!-- 2) Main UI (hidden until joined)                              -->
+  <!-- ────────────────────────────────────────────────────────────── -->
+  <div id="main-ui" class="hidden" style="max-width: 900px; margin: 20px auto;">
+    <!-- Sports Header: Reporter + Teams + Score -->
+    <div id="sportsHeader">
+      <div class="flex-row">
+        <div>
+          <span style="color: var(--text-secondary);">Reporter:</span>
+          <span id="reporterNameDisplay"></span>
+        </div>
+        <div id="scoreBoard">-- : --</div>
+      </div>
+      <div class="flex-row" style="margin-top: 8px;">
+        <div style="flex: 1;">
+          <span id="teamADisplay">Team A</span>
+        </div>
+        <div style="flex: 1; text-align: right;">
+          <span id="teamBDisplay">Team B</span>
+        </div>
+      </div>
+      <div id="goalIndicator">GOAL!</div>
     </div>
 
-    <!-- SCORE & GOAL SECTION -->
-    <div class="section">
-      <h2>Scoreboard</h2>
-      <div class="form-group">
-        <label for="scoreAInput">Score A:</label>
-        <input type="number" id="scoreAInput" min="0" value="0" />
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <!-- 3) Sports Controls (Goal, Local Record)                        -->
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <div class="card" style="margin-top: 16px; padding: 12px;">
+      <div class="flex-row gap-12">
+        <button id="goalBtn" class="btn btn-small">Report Goal</button>
+        <button id="localRecordBtn" class="btn btn-small">Record Segment</button>
+        <button id="stopLocalRecordBtn" class="btn btn-small" disabled>Stop Recording</button>
       </div>
-      <div class="form-group">
-        <label for="scoreBInput">Score B:</label>
-        <input type="number" id="scoreBInput" min="0" value="0" />
-      </div>
-      <div class="button-group">
-        <button id="updateScoreBtn">Update Score</button>
-        <button id="goalBtn" style="background: #dc3545;">Goal!</button>
-      </div>
+      <div id="localRecordLinks"></div>
     </div>
 
-    <!-- AUDIO METER SECTION -->
-    <div class="section">
-      <h2>Your Audio Level</h2>
-      <canvas id="meter-canvas" class="meter-canvas"></canvas>
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <!-- 4) Regular Remote Controls (Mute, Tone, Chat, Meter)           -->
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <div id="remoteControls" class="card" style="margin-top: 16px; padding: 12px;">
+      <h3>Audio & Chat Controls</h3>
+      <div class="flex-row align-center gap-12">
+        <button id="muteSelfBtn" class="btn">Mute Myself</button>
+        <button id="toneBtn" class="btn">Send GLITS Tone</button>
+        <button id="listenStudioBtn" class="btn">Listen to Studio</button>
+      </div>
+      <canvas id="meter-canvas" width="300" height="60" class="mt-10"></canvas>
+      <div class="flex-row mt-10 gap-8">
+        <input id="chatInput" type="text" placeholder="Type a message..." style="flex: 1;" />
+        <button id="sendChatBtn" class="btn">Send</button>
+      </div>
+      <div id="chatWindow" class="mt-6" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border-color); padding: 8px; background: var(--card-bg); border-radius: 4px;"></div>
     </div>
 
-    <!-- RECORDING SECTION -->
-    <div class="section">
-      <h2>Local Segment Recording</h2>
-      <div class="record-controls">
-        <button id="startSegmentBtn">Start Segment</button>
-        <button id="stopSegmentBtn" disabled>Stop Segment</button>
-      </div>
-      <div id="segmentPlayerContainer"></div>
-    </div>
-
-    <!-- CHAT SECTION -->
-    <div class="section">
-      <h2>Chat with Studio</h2>
-      <div class="chat-window" id="chatWindow"></div>
-      <div style="display: flex; margin-top: 5px;">
-        <input type="text" id="chatInput" placeholder="Type message..." />
-        <button id="sendChatBtn">Send</button>
-      </div>
-    </div>
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <!-- 5) Audio Elements (hidden)                                     -->
+    <!-- ────────────────────────────────────────────────────────────── -->
+    <audio id="audio-studio" autoplay playsinline style="display: none;"></audio>
   </div>
 
+  <!-- Include common utilities + this sports.js -->
   <script src="js/common.js"></script>
   <script src="js/sports.js"></script>
 </body>
