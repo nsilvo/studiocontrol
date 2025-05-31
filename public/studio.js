@@ -1,9 +1,8 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface (v8+PPM).
- * - Adds a Studio Mic PPM meter.
- * - Converts remote meters to PPM-style with peak hold.
+ * Front-end logic for the studio control interface (v9).
+ * - Adds number scales (0.00 to 1.00) on PPM meters (studio & remote).
  * - Maintains two-way audio, mutual mute, ICE queuing, and PPM.
  */
 
@@ -131,7 +130,7 @@
         break;
 
       case 'kicked':
-        alert(`You have been disconnected by the studio:\\n\\n${msg.reason}`);
+        alert(`You have been disconnected by the studio:\n\n${msg.reason}`);
         ws.close();
         break;
 
@@ -165,7 +164,6 @@
     // Keep the microphone track for adding to each peer
     studioAudioTrack = studioAudioStream.getAudioTracks()[0];
 
-    // Start drawing the PPM meter
     drawStudioPPM();
   }
 
@@ -188,20 +186,31 @@
       studioPPMPeak = Math.max(studioPPMPeak - 0.005, 0);
     }
 
-    // Clear canvas
+    // Draw background
     const width = studioMeterCanvas.width;
     const height = studioMeterCanvas.height;
     studioMeterCtx.clearRect(0, 0, width, height);
 
+    // Draw numeric scale (0.00 to 1.00)
+    studioMeterCtx.fillStyle = '#fff';
+    studioMeterCtx.font = '10px sans-serif';
+    studioMeterCtx.textAlign = 'center';
+    for (let i = 0; i <= 4; i++) {
+      const x = (i / 4) * width;
+      studioMeterCtx.fillRect(x, height - 10, 1, 10); // tick
+      const label = (i / 4).toFixed(2);
+      studioMeterCtx.fillText(label, x, height - 12);
+    }
+
     // Draw current level (green)
     const levelWidth = maxAmp * width;
     studioMeterCtx.fillStyle = '#4caf50';
-    studioMeterCtx.fillRect(0, 0, levelWidth, height);
+    studioMeterCtx.fillRect(0, 0, levelWidth, height - 12);
 
     // Draw peak hold line (red)
     const peakX = studioPPMPeak * width;
     studioMeterCtx.fillStyle = '#f44336';
-    studioMeterCtx.fillRect(peakX - 1, 0, 2, height);
+    studioMeterCtx.fillRect(peakX - 1, 0, 2, height - 12);
 
     requestAnimationFrame(drawStudioPPM);
   }
@@ -590,7 +599,7 @@
   // Parse Opus codec info from SDP
   /////////////////////////////////////////////////////
   function parseOpusInfo(sdp) {
-    const lines = sdp.split('\\n');
+    const lines = sdp.split('\n');
     let opusPayloadType = null;
     const fmtMap = new Map();
     let sampling = null,
@@ -645,7 +654,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Draw PPM meter for remote
+  // Draw PPM meter for remote (with number scale)
   /////////////////////////////////////////////////////
   function drawRemotePPM(remoteID) {
     const entry = peers.get(remoteID);
@@ -655,6 +664,17 @@
     const ctx = entry.meterContext;
     const width = canvas.width;
     const height = canvas.height;
+
+    // Draw numeric scale (0.00 to 1.00)
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 4; i++) {
+      const x = (i / 4) * width;
+      ctx.fillRect(x, height - 10, 1, 10); // tick
+      const label = (i / 4).toFixed(2);
+      ctx.fillText(label, x, height - 12);
+    }
 
     const bufferLength = entry.analyserL.fftSize;
     const dataL = new Float32Array(bufferLength);
@@ -678,18 +698,15 @@
       entry.ppmPeak = Math.max(entry.ppmPeak - 0.005, 0);
     }
 
-    // Clear canvas
-    ctx.clearRect(0, 0, width, height);
-
     // Draw current level (green)
     const levelWidth = maxAmp * width;
     ctx.fillStyle = '#4caf50';
-    ctx.fillRect(0, 0, levelWidth, height);
+    ctx.fillRect(0, 0, levelWidth, height - 12);
 
     // Draw peak hold line (red)
     const peakX = entry.ppmPeak * width;
     ctx.fillStyle = '#f44336';
-    ctx.fillRect(peakX - 1, 0, 2, height);
+    ctx.fillRect(peakX - 1, 0, 2, height - 12);
 
     requestAnimationFrame(() => drawRemotePPM(remoteID));
   }
