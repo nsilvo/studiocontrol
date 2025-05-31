@@ -1,29 +1,15 @@
 /**
- * public/js/remote.js
+ * public/js/remote.js (updated GLITS tone logic)
  *
  * - Two‐step remote flow:
- *    1. Prompt for name (Step 1).
- *    2. Once name is submitted, reveal main UI, show displayName, set up a
- *       stereo mic capture with a –14 dBFS compressor, and start WebSocket/RTC.
+ *    1. Prompt for name.
+ *    2. Once name is submitted, initialize UI, mic, and WebSocket/RTC.
  *
- * - Listens for studio “mode‐update” messages to switch between:
- *     • speech → mono (1 channel)
- *     • music  → stereo (2 channels)
- *   Automatically re‐negotiates the connection when mode changes.
- *
- * - Listens for studio “bitrate-update” messages to adjust encoder bitrate.
- *
- * - All outgoing audio is passed through a DynamicsCompressorNode (threshold –14 dBFS) 
- *   to approximate a –14 LUFS limit.
- *
- * - PPM meter displays two bars (left + right). If only 1 channel is active,
- *   it displays the same data on both bars (mono).
- *
- * - Receives an incoming audio track from the studio (the mixed “studio audio”) and
- *   plays it through <audio id="audio-studio">.
+ * - Listens for “mode‐update” and “bitrate‐update” from studio.
+ * - GLITS tone button is only enabled once WebRTC audioSender is set up.
  */
 
-document.addEventListener('DOMContentLoaded', () => {
+(() => {
   // TURN/STUN configuration
   const ICE_CONFIG = {
     iceServers: [
@@ -35,426 +21,444 @@ document.addEventListener('DOMContentLoaded', () => {
     ],
   };
 
-  const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
   let ws = null;
   let pc = null;
   let localStream = null;       // Raw mic MediaStream
+  let processedStream = null;   // After compressor
   let audioSender = null;
-  let remoteId = null;
+  let localID = null;
   let displayName = '';
-  let currentMode = 'music';    // Default to stereo
-  let currentBitrate = 16000;
-  let hasLoggedBitrate = false;
+  let currentMode = 'music';    // Default: 'music' → stereo, studio can override to 'speech'
+  let isMuted = false;
+  let isTone = false;
+
+  // GLITS‐tone nodes (always stereo)
+  let toneContext = null;
+  let leftOsc = null;
+  let rightOsc = null;
+  let gainLeft = null;
+  let gainRight = null;
+  let merger = null;
+  let glitsInterval = null;
+
+  // DOM elements
+  let nameInput;
+  let nameSubmitBtn;
+  let nameStepDiv;
+  let mainUiDiv;
+  let displayNameDiv;
+
+  let statusSpan;
+  let muteBtn;
+  let toneBtn;
+  let listenStudioBtn;
+  let meterCanvas;
+  let meterContext;
+  let chatWindowEl;
+  let chatInputEl;
+  let sendChatBtn;
+  let audioStudioElem;
 
   let audioContext = null;
   let analyserL = null;
   let analyserR = null;
 
-  // GLITS‐tone state
-  let isTone = false;
-  let toneContext = null;
-  let toneOsc = null;
-  let toneGain = null;
+  /////////////////////////////////////////////////////
+  // Step 1: Prompt for name
+  /////////////////////////////////////////////////////
+  function initNameStep() {
+    nameInput = document.getElementById('nameInput');
+    nameSubmitBtn = document.getElementById('nameSubmitBtn');
+    nameStepDiv = document.getElementById('name-step');
+    mainUiDiv = document.getElementById('main-ui');
+    displayNameDiv = document.getElementById('display-name');
 
-  // DOM elements
-  const nameStepDiv    = document.getElementById('name-step');
-  const nameInput      = document.getElementById('nameInput');
-  const nameSubmitBtn  = document.getElementById('nameSubmitBtn');
-  const mainUiDiv      = document.getElementById('main-ui');
-  const displayNameDiv = document.getElementById('display-name');
-  const statusSpan     = document.getElementById('connStatus');
-  const muteBtn        = document.getElementById('muteSelfBtn');
-  const toneBtn        = document.getElementById('toneBtn');
-  const listenBtn      = document.getElementById('listenStudioBtn');
-  const meterCanvas    = document.getElementById('meter-canvas');
-  const chatWindowEl   = document.getElementById('chatWindow');
-  const chatInputEl    = document.getElementById('chatInput');
-  const sendChatBtn    = document.getElementById('sendChatBtn');
-  const audioStudioEl  = document.getElementById('audio-studio');
+    nameSubmitBtn.onclick = () => {
+      const typedName = nameInput.value.trim();
+      if (!typedName) {
+        alert('Please enter your name.');
+        return;
+      }
+      displayName = typedName;
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 1) STEP 1: NAME SUBMISSION
-  // ────────────────────────────────────────────────────────────────────────
-  nameSubmitBtn.onclick = () => {
-    const name = nameInput.value.trim();
-    if (!name) {
-      alert('Please enter your name.');
-      return;
-    }
-    displayName = name;
-    nameStepDiv.classList.add('hidden');
-    mainUiDiv.classList.remove('hidden');
-    displayNameDiv.textContent = `Name: ${displayName}`;
-    statusSpan.textContent = 'Connecting WebSocket…';
-    initWebSocket();
-  };
+      // Hide name step, reveal main UI
+      nameStepDiv.classList.add('hidden');
+      mainUiDiv.classList.remove('hidden');
+      displayNameDiv.textContent = `Name: ${displayName}`;
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 2) WEBSOCKET SETUP & MESSAGE HANDLING
-  // ────────────────────────────────────────────────────────────────────────
+      // Initialize UI and WebSocket
+      initMainUI();
+      initWebSocket();
+    };
+  }
+
+  /////////////////////////////////////////////////////
+  // Step 2: Initialize main UI & event handlers
+  /////////////////////////////////////////////////////
+  function initMainUI() {
+    statusSpan = document.getElementById('connStatus');
+    muteBtn = document.getElementById('muteSelfBtn');
+    toneBtn = document.getElementById('toneBtn');
+    listenStudioBtn = document.getElementById('listenStudioBtn');
+    meterCanvas = document.getElementById('meter-canvas');
+    meterContext = meterCanvas.getContext('2d');
+    chatWindowEl = document.getElementById('chatWindow');
+    chatInputEl = document.getElementById('chatInput');
+    sendChatBtn = document.getElementById('sendChatBtn');
+    audioStudioElem = document.getElementById('audio-studio');
+
+    muteBtn.onclick = toggleMute;
+    listenStudioBtn.onclick = toggleListenStudio;
+    sendChatBtn.onclick = sendChat;
+
+    // Disable tone button until audioSender is ready
+    toneBtn.disabled = true;
+    toneBtn.onclick = toggleTone;
+  }
+
+  /////////////////////////////////////////////////////
+  // Initialize WebSocket & event listeners
+  /////////////////////////////////////////////////////
   function initWebSocket() {
-    ws = new WebSocket(WS_URL);
-
+    ws = new WebSocket(`wss://${window.location.host}`);
     ws.onopen = () => {
-      console.log('[remote] WS opened');
-      statusSpan.textContent = 'WS connected. Joining…';
+      console.log('[remote] WS connected');
+      statusSpan.textContent = 'Connected (WS)';
+      // Send join with displayName
       ws.send(
         JSON.stringify({
           type: 'join',
           role: 'remote',
-          name: displayName
+          name: displayName,
         })
       );
     };
-
     ws.onmessage = (evt) => {
       let msg;
       try {
         msg = JSON.parse(evt.data);
-      } catch (e) {
-        console.error('[remote] Invalid JSON:', e);
+      } catch (err) {
+        console.error('[remote] Invalid JSON from server:', err);
         return;
       }
       handleSignalingMessage(msg);
     };
-
     ws.onclose = () => {
-      console.warn('[remote] WS closed. Reconnecting in 5s…');
-      statusSpan.textContent = 'WS disconnected. Reconnecting…';
+      console.warn('[remote] WS closed. Reconnecting in 5 seconds...');
+      statusSpan.textContent = 'Disconnected (WS)';
       setTimeout(initWebSocket, 5000);
       if (pc) {
         pc.close();
         pc = null;
       }
+      // Reset tone state
+      if (isTone) {
+        stopGlitsTone();
+        isTone = false;
+        toneBtn.textContent = 'Send GLITS Tone';
+        toneBtn.disabled = true;
+      }
     };
-
     ws.onerror = (err) => {
       console.error('[remote] WS error:', err);
       ws.close();
     };
   }
 
-  function handleSignalingMessage(msg) {
+  /////////////////////////////////////////////////////
+  // Handle incoming signaling messages
+  /////////////////////////////////////////////////////
+  async function handleSignalingMessage(msg) {
     switch (msg.type) {
-      case 'joined':
-        // { type:'joined', id }
-        remoteId = msg.id;
-        console.log('[remote] Assigned ID:', remoteId);
-        statusSpan.textContent = 'Waiting for studio call…';
+      case 'id-assigned':
+        // { type:'id-assigned', id }
+        localID = msg.id;
+        console.log('[remote] Assigned ID:', localID);
+        statusSpan.textContent = 'Waiting for studio';
         break;
 
       case 'start-call':
-        // Received when studio clicks “Call”
-        statusSpan.textContent = 'Starting WebRTC…';
-        startWebRTC();
+        // Studio asks us to start WebRTC
+        statusSpan.textContent = 'Connecting (WebRTC)...';
+        await startWebRTC();
         break;
 
       case 'answer':
         // { type:'answer', sdp }
-        handleAnswer(msg.sdp);
+        await handleAnswer(msg.sdp);
         break;
 
       case 'candidate':
         // { type:'candidate', candidate }
-        handleCandidate(msg.candidate);
+        await handleCandidate(msg.candidate);
         break;
 
       case 'mode-update':
-        // { type:'mode-update', mode:'speech'|'music' }
-        applyMode(msg.mode);
+        // { type:'mode-update', mode: 'speech'|'music' }
+        console.log('[remote] Received mode-update:', msg.mode);
+        await applyMode(msg.mode);
         break;
 
       case 'bitrate-update':
         // { type:'bitrate-update', bitrate:<number> }
-        handleBitrateUpdate(msg.bitrate);
+        console.log('[remote] Received bitrate-update:', msg.bitrate);
+        setAudioBitrate(msg.bitrate);
         break;
 
-      case 'mute-update':
-        // { type:'mute-update', muted:true }
-        handleMuteUpdate(msg.muted);
-        break;
-
-      case 'kick':
-        alert('You have been kicked by the studio.');
-        ws.close();
+      case 'studio-disconnected':
+        console.warn('[remote] Studio disconnected.');
+        statusSpan.textContent = 'Studio disconnected';
         break;
 
       case 'chat':
-        // { type:'chat', from:'studio', text }
-        appendChatMessage('Studio', msg.text);
+        // { type:'chat', from:'Studio', message }
+        appendChatMessage(msg.from, msg.text, false);
+        break;
+
+      case 'mute-update':
+        // { type:'mute-update', muted:true/false }
+        console.log('[remote] Mute update:', msg.muted);
+        applyRemoteMute(msg.muted);
         break;
 
       default:
-        console.warn('[remote] Unknown message:', msg.type);
+        console.warn('[remote] Unknown signaling message:', msg.type);
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 3) WEBRTC SETUP
-  // ────────────────────────────────────────────────────────────────────────
+  /////////////////////////////////////////////////////
+  // Start WebRTC: capture mic, compress, and connect
+  /////////////////////////////////////////////////////
   async function startWebRTC() {
+    // Step 1: capture mic with requested channel count
+    const channelCount = currentMode === 'speech' ? 1 : 2;
     try {
-      // 3.1 Get userMedia
-      const constraints = {
+      localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 48000,
-          channelCount: currentMode === 'music' ? 2 : 1,
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      };
-      localStream = await navigator.mediaDevices.getUserMedia(constraints);
-      setupPPMMeter(localStream);
+          channelCount: channelCount,
+        },
+      });
+    } catch (err) {
+      console.error('[remote] getUserMedia error:', err);
+      statusSpan.textContent = 'Mic error';
+      return;
+    }
 
-      // 3.2 Create RTCPeerConnection
+    // Step 2: process through compressor graph
+    processedStream = createCompressedStream(localStream);
+
+    // Step 3: create PeerConnection (if not exists already)
+    if (!pc) {
       pc = new RTCPeerConnection(ICE_CONFIG);
 
-      // 3.3 Add local mic track
-      audioSender = pc.addTrack(localStream.getAudioTracks()[0], localStream);
-
-      // 3.4 Listen for incoming studio track
       pc.ontrack = (evt) => {
-        const [studioStream] = evt.streams;
-        if (audioStudioEl.srcObject !== studioStream) {
-          audioStudioEl.srcObject = studioStream;
-          audioStudioEl.style.display = 'block';
+        const [incomingStream] = evt.streams;
+        if (!audioStudioElem.srcObject) {
+          audioStudioElem.srcObject = incomingStream;
         }
       };
 
-      // 3.5 ICE candidate handler
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
+      pc.onicecandidate = (evt) => {
+        if (evt.candidate) {
           ws.send(
             JSON.stringify({
               type: 'candidate',
-              from: remoteId,
+              from: localID,
               target: 'studio',
-              candidate: e.candidate
+              candidate: evt.candidate,
             })
           );
         }
       };
 
-      // 3.6 Create offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      // 3.7 Send offer
-      ws.send(
-        JSON.stringify({
-          type: 'offer',
-          from: remoteId,
-          sdp: offer.sdp
-        })
-      );
-      statusSpan.textContent = 'Offer sent. Awaiting answer…';
-    } catch (err) {
-      console.error('[remote] startWebRTC error:', err);
-      statusSpan.textContent = 'Error starting call.';
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        statusSpan.textContent = `Connected (WebRTC: ${state})`;
+        console.log('[remote] Connection state:', state);
+      };
+    } else {
+      // If PC exists from a previous call (mode-change), remove old sender
+      if (audioSender) {
+        pc.removeTrack(audioSender);
+        audioSender = null;
+      }
     }
+
+    // Step 4: add the compressed track
+    audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
+
+    // Enable tone button now that audioSender is ready:
+    toneBtn.disabled = false;
+
+    // Step 5: set a default bitrate (studio can override later)
+    setAudioBitrate(64000);
+
+    // Step 6: start the PPM meter for processedStream
+    setupLocalMeter(processedStream);
+
+    // Step 7: create offer → send to studio
+    let offer;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      console.error('[remote] createOffer error:', err);
+      return;
+    }
+
+    ws.send(
+      JSON.stringify({
+        type: 'offer',
+        from: localID,
+        sdp: pc.localDescription.sdp,
+      })
+    );
   }
 
+  /////////////////////////////////////////////////////
+  // Handle answer from studio
+  /////////////////////////////////////////////////////
   async function handleAnswer(sdp) {
     if (!pc) return;
     try {
-      await pc.setRemoteDescription(
-        new RTCSessionDescription({ type: 'answer', sdp })
-      );
-      statusSpan.textContent = 'Connected to studio.';
-    } catch (e) {
-      console.error('[remote] setRemoteDescription error:', e);
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+      console.log('[remote] Remote description (answer) set');
+    } catch (err) {
+      console.error('[remote] setRemoteDescription error:', err);
     }
   }
 
+  /////////////////////////////////////////////////////
+  // Handle ICE candidate from studio
+  /////////////////////////////////////////////////////
   async function handleCandidate(candidate) {
     if (!pc || !pc.remoteDescription) return;
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) {
-      console.error('[remote] addIceCandidate error:', e);
+    } catch (err) {
+      console.error('[remote] addIceCandidate error:', err);
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 4) MODE & BITRATE CHANGES
-  // ────────────────────────────────────────────────────────────────────────
-  async function applyMode(mode) {
-    if (mode !== 'speech' && mode !== 'music') return;
-    if (mode === currentMode) return;
-    currentMode = mode;
+  /////////////////////////////////////////////////////
+  // Apply a new mode: 'speech' (mono) or 'music' (stereo)
+  // Re‐capture, re‐compress, replace track, and renegotiate.
+  /////////////////////////////////////////////////////
+  async function applyMode(newMode) {
+    if (newMode !== 'speech' && newMode !== 'music') return;
+    if (currentMode === newMode) return;
+    currentMode = newMode;
+    if (!pc) return; // PC not started yet, startWebRTC will use updated currentMode
 
-    if (!pc) {
-      statusSpan.textContent = `Mode changed to ${mode}. Waiting to call.`;
-      return;
-    }
-
-    // Renegotiate with new channel count
-    // 1) Replace old mic track
-    if (audioSender && localStream) {
+    // 1) Stop existing Track + AudioContext if any
+    if (audioSender) {
       pc.removeTrack(audioSender);
       audioSender = null;
     }
-    // 2) Get new stream
-    try {
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 48000,
-          channelCount: currentMode === 'music' ? 2 : 1,
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      });
-      localStream = newStream;
-      setupPPMMeter(localStream);
-      audioSender = pc.addTrack(localStream.getAudioTracks()[0], localStream);
-      // Reapply bitrate
-      handleBitrateUpdate(currentBitrate);
-
-      // 3) Create and send new offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      ws.send(
-        JSON.stringify({
-          type: 'offer',
-          from: remoteId,
-          sdp: offer.sdp
-        })
-      );
-      statusSpan.textContent = `Mode switched to ${mode}. Renegotiated.`;
-    } catch (e) {
-      console.error('[remote] applyMode error:', e);
-    }
-  }
-
-  function handleBitrateUpdate(bitrate) {
-    currentBitrate = bitrate;
-    if (!audioSender) {
-      console.warn('[remote] Audio sender not ready for bitrate change');
-      return;
-    }
-    const params = audioSender.getParameters();
-    if (!params.encodings) params.encodings = [{}];
-    params.encodings[0].maxBitrate = bitrate;
-    audioSender
-      .setParameters(params)
-      .then(() => {
-        if (!hasLoggedBitrate) {
-          console.log(`[remote] Audio bitrate set to ${bitrate} bps`);
-          hasLoggedBitrate = true;
-        }
-        statusSpan.textContent = `Bitrate set to ${Math.round(bitrate / 1000)} kbps`;
-      })
-      .catch((err) => {
-        console.warn('[remote] setParameters error:', err);
-      });
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // 5) MUTE UPDATE FROM STUDIO
-  // ────────────────────────────────────────────────────────────────────────
-  function handleMuteUpdate(muted) {
-    if (localStream) {
-      localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
-      statusSpan.textContent = muted ? 'You have been muted.' : 'You are unmuted.';
-    }
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // 6) CHAT
-  // ────────────────────────────────────────────────────────────────────────
-  function appendChatMessage(sender, text) {
-    const div = document.createElement('div');
-    div.textContent = `[${sender}]: ${text}`;
-    chatWindowEl.appendChild(div);
-    chatWindowEl.scrollTop = chatWindowEl.scrollHeight;
-  }
-
-  sendChatBtn.onclick = () => {
-    const text = chatInputEl.value.trim();
-    if (!text) return;
-    ws.send(
-      JSON.stringify({
-        type: 'chat',
-        fromRole: 'remote',
-        fromId: remoteId,
-        target: 'studio',
-        text
-      })
-    );
-    appendChatMessage('You', text);
-    chatInputEl.value = '';
-  };
-
-  // ────────────────────────────────────────────────────────────────────────
-  // 7) GLITS TEST TONE & MUTE SELF
-  // ────────────────────────────────────────────────────────────────────────
-  toneBtn.onclick = () => {
-    if (!audioSender) {
-      alert('Audio not yet streaming.');
-      return;
-    }
-    if (!isTone) {
-      toneContext = new (window.AudioContext || window.webkitAudioContext)();
-      toneGain = toneContext.createGain();
-      toneGain.gain.value = 0.1;
-      toneOsc = toneContext.createOscillator();
-      toneOsc.frequency.value = 1000;
-      const toneDest = toneContext.createMediaStreamDestination();
-      toneOsc.connect(toneGain).connect(toneDest);
-      toneOsc.start();
-
-      audioSender.replaceTrack(toneDest.stream.getAudioTracks()[0]);
-      statusSpan.textContent = 'Sending test tone…';
-      toneBtn.textContent = 'Stop Test Tone';
-      isTone = true;
-    } else {
-      toneOsc.stop();
-      toneOsc.disconnect();
-      toneGain.disconnect();
-      if (localStream) {
-        audioSender.replaceTrack(localStream.getAudioTracks()[0]);
-      }
-      statusSpan.textContent = 'Test tone stopped.';
-      toneBtn.textContent = 'Send GLITS Tone';
-      isTone = false;
-    }
-  };
-
-  muteBtn.onclick = () => {
-    if (!localStream) return;
-    const track = localStream.getAudioTracks()[0];
-    track.enabled = !track.enabled;
-    muteBtn.textContent = track.enabled ? 'Mute Myself' : 'Unmute Myself';
-  };
-
-  listenBtn.onclick = () => {
-    if (!audioStudioEl.srcObject) {
-      alert('No studio audio yet.');
-      return;
-    }
-    audioStudioEl.muted = !audioStudioEl.muted;
-    listenBtn.textContent = audioStudioEl.muted ? 'Listen to Studio' : 'Mute Studio Audio';
-  };
-
-  // ────────────────────────────────────────────────────────────────────────
-  // 8) LOCAL PPM METER
-  // ────────────────────────────────────────────────────────────────────────
-  function setupPPMMeter(stream) {
     if (audioContext) {
       audioContext.close();
       audioContext = null;
       analyserL = null;
       analyserR = null;
     }
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 48000
-    });
-    const source = audioContext.createMediaStreamSource(stream);
-    const splitter = audioContext.createChannelSplitter(2);
 
-    analyserL = audioContext.createAnalyser();
+    // 2) Get new mic capture with updated channelCount
+    const channelCount = currentMode === 'speech' ? 1 : 2;
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 48000,
+          channelCount: channelCount,
+        },
+      });
+    } catch (err) {
+      console.error('[remote] getUserMedia (mode-change) error:', err);
+      return;
+    }
+
+    // 3) Re‐compress
+    processedStream = createCompressedStream(localStream);
+
+    // 4) Add new track
+    audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
+
+    // 5) (Leave bitrate for studio to resend)
+
+    // 6) Restart PPM meter
+    setupLocalMeter(processedStream);
+
+    // 7) Renegotiate: create new offer and send to studio
+    let offer;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(
+        JSON.stringify({
+          type: 'offer',
+          from: localID,
+          sdp: pc.localDescription.sdp,
+        })
+      );
+    } catch (err) {
+      console.error('[remote] Reoffer error (mode-change):', err);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Create a compressed MediaStream from a raw mic stream
+  // Uses a DynamicsCompressorNode with threshold –14 dBFS.
+  /////////////////////////////////////////////////////
+  function createCompressedStream(rawStream) {
+    // If there is an existing audioContext, close it first
+    if (audioContext) {
+      audioContext.close();
+      audioContext = null;
+      analyserL = null;
+      analyserR = null;
+    }
+
+    // 1) New AudioContext
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+
+    // 2) Create MediaStreamSource from raw mic
+    const srcNode = audioContext.createMediaStreamSource(rawStream);
+
+    // 3) Create a DynamicsCompressorNode
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.setValueAtTime(-14, audioContext.currentTime); // –14 dBFS threshold
+    compressor.knee.setValueAtTime(0, audioContext.currentTime);
+    compressor.ratio.setValueAtTime(12, audioContext.currentTime);
+    compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
+    compressor.release.setValueAtTime(0.25, audioContext.currentTime);
+
+    // 4) Connect source → compressor
+    srcNode.connect(compressor);
+
+    // 5) Create a MediaStreamDestination
+    const destNode = audioContext.createMediaStreamDestination();
+    compressor.connect(destNode);
+
+    // 6) Return the new compressed stream
+    return destNode.stream;
+  }
+
+  /////////////////////////////////////////////////////
+  // Local audio PPM meter (always stereo output)
+  /////////////////////////////////////////////////////
+  function setupLocalMeter(stream) {
+    // Create a NEW AudioContext solely for metering
+    const meterContextAudio = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+    const source = meterContextAudio.createMediaStreamSource(stream);
+    const splitter = meterContextAudio.createChannelSplitter(2);
+
+    analyserL = meterContextAudio.createAnalyser();
     analyserL.fftSize = 256;
-    analyserR = audioContext.createAnalyser();
+    analyserR = meterContextAudio.createAnalyser();
     analyserR.fftSize = 256;
 
     source.connect(splitter);
@@ -470,16 +474,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const bufferLength = analyserL.frequencyBinCount;
     const dataArrayL = new Uint8Array(bufferLength);
     const dataArrayR = new Uint8Array(bufferLength);
-    const ctx = meterCanvas.getContext('2d');
-    const width = meterCanvas.width;
-    const height = meterCanvas.height;
 
     function draw() {
       analyserL.getByteFrequencyData(dataArrayL);
       analyserR.getByteFrequencyData(dataArrayR);
 
-      let sumL = 0,
-        sumR = 0;
+      let sumL = 0, sumR = 0;
       for (let i = 0; i < bufferLength; i++) {
         sumL += dataArrayL[i] * dataArrayL[i];
         sumR += dataArrayR[i] * dataArrayR[i];
@@ -487,29 +487,290 @@ document.addEventListener('DOMContentLoaded', () => {
       const rmsL = Math.sqrt(sumL / bufferLength) / 255;
       const rmsR = Math.sqrt(sumR / bufferLength) / 255;
 
-      ctx.clearRect(0, 0, width, height);
+      const width = meterCanvas.width;
+      const height = meterCanvas.height;
+      meterContext.clearRect(0, 0, width, height);
 
-      // Left (green) top half
-      const barL = Math.round(rmsL * width);
-      ctx.fillStyle = '#4caf50';
-      ctx.fillRect(0, 0, barL, height / 2 - 2);
+      // Left channel (green) on top half
+      const barWidthL = Math.round(rmsL * width);
+      meterContext.fillStyle = '#4caf50';
+      meterContext.fillRect(0, 0, barWidthL, height / 2 - 2);
 
-      // Right (blue) bottom half
-      const barR = Math.round(rmsR * width);
-      ctx.fillStyle = '#2196f3';
-      ctx.fillRect(0, height / 2 + 2, barR, height / 2 - 2);
+      // Right channel (blue) on bottom half
+      const barWidthR = Math.round(rmsR * width);
+      meterContext.fillStyle = '#2196f3';
+      meterContext.fillRect(0, height / 2 + 2, barWidthR, height / 2 - 2);
 
       requestAnimationFrame(draw);
     }
     draw();
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // 9) CLEANUP ON UNLOAD
-  // ────────────────────────────────────────────────────────────────────────
-  window.addEventListener('beforeunload', () => {
-    if (pc) pc.close();
-    if (ws) ws.close();
-    if (audioContext) audioContext.close();
+  /////////////////////////////////////////////////////
+  // Set outgoing audio bitrate on RTCRtpSender
+  /////////////////////////////////////////////////////
+  async function setAudioBitrate(bitrate) {
+    if (!audioSender) {
+      console.warn('[remote] Audio sender not yet ready for bitrate change');
+      return;
+    }
+    const params = audioSender.getParameters();
+    if (!params.encodings) params.encodings = [{}];
+    params.encodings.forEach((enc) => {
+      enc.maxBitrate = bitrate;
+    });
+    try {
+      await audioSender.setParameters(params);
+      console.log(`[remote] Audio bitrate set to ${bitrate} bps`);
+      statusSpan.textContent = `Bitrate: ${Math.round(bitrate / 1000)} kbps`;
+    } catch (err) {
+      console.error('[remote] setParameters error:', err);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Toggle mute/unmute (remote → studio)
+  /////////////////////////////////////////////////////
+  function toggleMute() {
+    if (!audioSender) return;
+    isMuted = !isMuted;
+    const track = isMuted ? null : processedStream.getAudioTracks()[0];
+    audioSender.replaceTrack(track);
+
+    ws.send(
+      JSON.stringify({
+        type: 'mute-update',
+        from: localID,
+        target: 'studio',
+        muted: isMuted,
+      })
+    );
+
+    muteBtn.textContent = isMuted ? 'Unmute Myself' : 'Mute Myself';
+  }
+
+  /////////////////////////////////////////////////////
+  // Apply remote‐imposed mute (studio → remote)
+  /////////////////////////////////////////////////////
+  function applyRemoteMute(muted) {
+    isMuted = muted;
+    if (audioSender) {
+      const track = isMuted ? null : processedStream.getAudioTracks()[0];
+      audioSender.replaceTrack(track);
+      console.log('[remote] Applied studio mute:', muted);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Toggle listen to studio audio
+  /////////////////////////////////////////////////////
+  function toggleListenStudio() {
+    if (!audioStudioElem.srcObject) {
+      alert('You are not yet connected to studio audio.');
+      return;
+    }
+    audioStudioElem.muted = !audioStudioElem.muted;
+    listenStudioBtn.textContent = audioStudioElem.muted
+      ? 'Listen to Studio'
+      : 'Mute Studio Audio';
+  }
+
+  /////////////////////////////////////////////////////
+  // Toggle GLITS Tone (always stereo)
+  /////////////////////////////////////////////////////
+  function toggleTone() {
+    if (!audioSender) {
+      console.warn('[remote] Cannot send tone: audioSender not ready');
+      return;
+    }
+
+    if (!isTone) {
+      console.log('[remote] Starting GLITS tone');
+      startGlitsTone();
+      isTone = true;
+      toneBtn.textContent = 'Stop GLITS Tone';
+    } else {
+      console.log('[remote] Stopping GLITS tone');
+      stopGlitsTone();
+      isTone = false;
+      toneBtn.textContent = 'Send GLITS Tone';
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Start GLITS Tone (always stereo)
+  /////////////////////////////////////////////////////
+  function startGlitsTone() {
+    if (!audioSender) {
+      console.warn('[remote] audioSender not set; cannot start tone');
+      return;
+    }
+
+    // 1 kHz on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
+    const amplitude = 0.125892541;
+
+    // If there was a previous toneContext, close it first
+    if (toneContext) {
+      toneContext.close();
+      toneContext = null;
+      leftOsc = null;
+      rightOsc = null;
+      gainLeft = null;
+      gainRight = null;
+      merger = null;
+      clearInterval(glitsInterval);
+    }
+
+    toneContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+
+    // Create oscillators for left & right
+    leftOsc = toneContext.createOscillator();
+    rightOsc = toneContext.createOscillator();
+    leftOsc.type = 'sine';
+    rightOsc.type = 'sine';
+    leftOsc.frequency.setValueAtTime(1000, toneContext.currentTime);
+    rightOsc.frequency.setValueAtTime(1000, toneContext.currentTime);
+
+    // Create gain nodes
+    gainLeft = toneContext.createGain();
+    gainRight = toneContext.createGain();
+    gainLeft.gain.value = amplitude;
+    gainRight.gain.value = amplitude;
+
+    // Create merger (2 inputs→stereo)
+    merger = toneContext.createChannelMerger(2);
+
+    // Connect: leftOsc→gainLeft→merger input 0
+    leftOsc.connect(gainLeft);
+    gainLeft.connect(merger, 0, 0);
+
+    // Connect: rightOsc→gainRight→merger input 1
+    rightOsc.connect(gainRight);
+    gainRight.connect(merger, 0, 1);
+
+    // Start oscillators
+    leftOsc.start();
+    rightOsc.start();
+
+    // Create destination (MediaStream) for the merged stereo
+    const dest = toneContext.createMediaStreamDestination();
+    merger.connect(dest);
+
+    // Replace outgoing track with the GLITS stream
+    audioSender.replaceTrack(dest.stream.getAudioTracks()[0]);
+    console.log('[remote] Replaced track with GLITS tone');
+
+    // Schedule interruptions every 4 s
+    setGlitsSchedule();
+    glitsInterval = setInterval(setGlitsSchedule, 4000);
+
+    // Meter the GLITS tone (dest.stream is stereo)
+    setupLocalMeter(dest.stream);
+  }
+
+  /////////////////////////////////////////////////////
+  // Stop GLITS Tone
+  /////////////////////////////////////////////////////
+  function stopGlitsTone() {
+    if (glitsInterval) {
+      clearInterval(glitsInterval);
+      glitsInterval = null;
+    }
+    if (leftOsc) {
+      leftOsc.stop();
+      leftOsc.disconnect();
+      leftOsc = null;
+    }
+    if (rightOsc) {
+      rightOsc.stop();
+      rightOsc.disconnect();
+      rightOsc = null;
+    }
+    if (gainLeft) {
+      gainLeft.disconnect();
+      gainLeft = null;
+    }
+    if (gainRight) {
+      gainRight.disconnect();
+      gainRight = null;
+    }
+    if (merger) {
+      merger.disconnect();
+      merger = null;
+    }
+
+    // Restore microphone track
+    if (processedStream && audioSender) {
+      audioSender.replaceTrack(processedStream.getAudioTracks()[0]);
+      console.log('[remote] Restored mic track after GLITS tone');
+      setupLocalMeter(processedStream);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Schedule a single GLITS cycle (4 s)
+  /////////////////////////////////////////////////////
+  function setGlitsSchedule() {
+    if (!toneContext || !gainLeft || !gainRight) return;
+    const base = toneContext.currentTime;
+
+    // LEFT: silent [t → t+0.25], then on [t+0.25 → next cycle]
+    gainLeft.gain.setValueAtTime(0, base);
+    gainLeft.gain.setValueAtTime(0.125892541, base + 0.25);
+
+    // RIGHT channel pattern:
+    //  On [t → t+0.25]
+    gainRight.gain.setValueAtTime(0.125892541, base);
+    //  Silence [t+0.25 → t+0.50]
+    gainRight.gain.setValueAtTime(0, base + 0.25);
+    //  On [t+0.50 → t+0.75]
+    gainRight.gain.setValueAtTime(0.125892541, base + 0.5);
+    //  Silence [t+0.75 → t+1.00]
+    gainRight.gain.setValueAtTime(0, base + 0.75);
+    //  Then remain on until next cycle
+    gainRight.gain.setValueAtTime(0.125892541, base + 1.0);
+  }
+
+  /////////////////////////////////////////////////////
+  // Chat: append message
+  /////////////////////////////////////////////////////
+  function appendChatMessage(senderName, message, isLocal) {
+    const div = document.createElement('div');
+    div.className = 'chat-message';
+    if (isLocal) {
+      div.innerHTML = `<strong>You:</strong> ${message}`;
+    } else {
+      div.innerHTML = `<strong>${senderName}:</strong> ${message}`;
+    }
+    chatWindowEl.appendChild(div);
+    chatWindowEl.scrollTop = chatWindowEl.scrollHeight;
+  }
+
+  /////////////////////////////////////////////////////
+  // Send chat
+  /////////////////////////////////////////////////////
+  function sendChat() {
+    const text = chatInputEl.value.trim();
+    if (!text) return;
+    ws.send(
+      JSON.stringify({
+        type: 'chat',
+        from: localID,
+        name: displayName,
+        text: text,
+        target: 'studio',
+      })
+    );
+    appendChatMessage('You', text, true);
+    chatInputEl.value = '';
+  }
+
+  /////////////////////////////////////////////////////
+  // DOCUMENT READY
+  /////////////////////////////////////////////////////
+  window.addEventListener('load', () => {
+    initNameStep();
   });
-});
+})();

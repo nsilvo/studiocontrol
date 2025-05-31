@@ -1,14 +1,11 @@
 /**
  * public/js/studio.js
  *
- * - Captures studio mic → drives the top‐left horizontal VU meter (#studioVuCanvas).
- * - Mixes all incoming remote audio into a “Remote Mix” analyser → drives the top‐right horizontal VU meter (#remoteMixVuCanvas).
- * - For each remote:
- *     • Creates a compact 250×150 card (with buttons: Call, Mute/Unmute, Mode, Bitrate, Toggle Stats).
- *     • Hides per‐remote chat entirely.
- * - All remote cards appear in #remotesContainer (a flex‐wrapped row).
- * - Single global chat → broadcast to all remotes.
- * - Recording controls at bottom (unchanged).
+ * - Captures studio mic → drives #studioVuCanvas horizontal VU meter.
+ * - Captures mixed remote audio → drives #remoteMixVuCanvas horizontal VU meter.
+ * - Creates per‐remote cards (250×150) with Call, Mute/Unmute, Mode, Bitrate, Toggle Stats.
+ * - Single global “Studio Chat”—now displays each incoming message with the remote’s display name (not UUID).
+ * - Recording controls remain unchanged.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -112,16 +109,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const remoteMixVuCanvas = document.getElementById('remoteMixVuCanvas');
   const remoteMixVuCtx = remoteMixVuCanvas.getContext('2d');
 
-  /**
-   * Initialize the remote‐mix analyser by creating a mixing GainNode and
-   * connecting it to an AnalyserNode. This runs immediately after mic init.
-   */
   function initRemoteMixMeter() {
     remoteAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-    // GainNode to mix all incoming remote streams
     remoteMixer = remoteAudioContext.createGain();
     remoteMixer.gain.value = 1.0;
-    // Analyser for the mixed signal
     remoteAnalyser = remoteAudioContext.createAnalyser();
     remoteAnalyser.fftSize = 256;
     remoteMixer.connect(remoteAnalyser);
@@ -133,17 +124,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function drawRemoteMixVuMeter() {
     if (!remoteAnalyser) return;
     remoteAnalyser.getByteFrequencyData(remoteRMSData);
-    // Compute RMS
     let sum = 0;
     for (let i = 0; i < remoteRMSData.length; i++) {
       sum += remoteRMSData[i] * remoteRMSData[i];
     }
     const rms = Math.sqrt(sum / remoteRMSData.length) / 255; // 0..1
 
-    // Clear
     remoteMixVuCtx.clearRect(0, 0, hVuWidth, hVuHeight);
 
-    // Draw 10 horizontal segments (left-to-right)
     const segments = 10;
     const segWidth = hVuWidth / segments;
     for (let i = 0; i < segments; i++) {
@@ -162,9 +150,6 @@ document.addEventListener('DOMContentLoaded', () => {
     remoteRafId = requestAnimationFrame(drawRemoteMixVuMeter);
   }
 
-  /**
-   * Helper to pick green / yellow / red from CSS variables based on [0..1].
-   */
   function pickColorForLevel(level) {
     if (level < 0.6) {
       return getComputedStyle(document.documentElement).getPropertyValue('--meter-green');
@@ -176,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // 4) GLOBAL CHAT (Broadcast-only)
+  // 4) GLOBAL CHAT (Broadcast-only, now shows display name)
   // ────────────────────────────────────────────────────────────────────────
   const chatWindowAll = document.getElementById('chatWindow');
   const chatInputAll = document.getElementById('chatInput');
@@ -263,9 +248,12 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'remote-disconnected':
         teardownPeer(msg.id);
         break;
-      case 'chat':
-        appendGlobalChatMessage(msg.fromId || 'Remote', msg.text);
+      case 'chat': {
+        // Now use msg.name (displayName) if provided; otherwise fallback to msg.fromId
+        const sender = msg.name || msg.fromId || 'Remote';
+        appendGlobalChatMessage(sender, msg.text);
         break;
+      }
       default:
         console.warn('[studio] Unknown message:', msg.type);
     }
@@ -287,8 +275,6 @@ document.addEventListener('DOMContentLoaded', () => {
         <div>10</div><div>8</div><div>6</div><div>4</div><div>2</div><div>0</div>
       </div>
     `;
-    // Insert this remote VU below the two horizontal meters:
-    // mainVuContainer is flex-row justify-between, so append will place it to the right.
     vuContainer.appendChild(remoteVuCard);
     const remoteVuCanvas = remoteVuCard.querySelector('.remoteVuCanvas');
     const remoteVuCtx = remoteVuCanvas.getContext('2d');
@@ -344,9 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
           for (let i = 0; i < rmsDataRec.length; i++) sum += rmsDataRec[i] * rmsDataRec[i];
           const rms = Math.sqrt(sum / rmsDataRec.length) / 255;
 
-          // Clear
           remoteVuCtx.clearRect(0, 0, 20, 150);
-          // Draw 10 vertical segments (bottom-to-top)
           const segments = 10;
           const segHeight = 150 / segments;
           for (let i = 0; i < segments; i++) {
@@ -367,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
         drawRemoteVu();
 
         const peerData = peers.get(remoteId);
-        peerData.rafIdRec = true; // flag so we only create one loop
+        peerData.rafIdRec = true; // mark that remote‐vu loop is running
       }
     };
 
