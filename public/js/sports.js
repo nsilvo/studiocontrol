@@ -187,7 +187,6 @@
   // Update the score display (TeamA : TeamB)
   /////////////////////////////////////////////////////
   function updateScoreDisplay() {
-    // By the time this is called, scoreBoard has been initialized
     scoreBoard.textContent = `${scoreA} : ${scoreB}`;
   }
 
@@ -196,7 +195,7 @@
   /////////////////////////////////////////////////////
   function reportGoal() {
     if (goalPending) return; // already waiting for ack
-    // For simplicity, we increment Team A’s score
+    // Increment Team A’s score for simplicity
     scoreA += 1;
     updateScoreDisplay();
 
@@ -235,7 +234,6 @@
       alert('Audio not initialized yet.');
       return;
     }
-    // Use the processedStream (mic/tone) for local recording
     localRecorder = new MediaRecorder(processedStream, { mimeType: 'audio/webm' });
     localChunks = [];
     localRecorder.ondataavailable = (e) => {
@@ -274,7 +272,7 @@
       console.log('[sports] WS connected');
       statusSpan.textContent = 'Connected (WS)';
 
-      // Send join along with reporterName so studio knows who and which page
+      // Send join along with reporterName
       ws.send(
         JSON.stringify({
           type: 'join',
@@ -375,7 +373,7 @@
         break;
 
       default:
-        // we ignore keepalive and other unrecognized types
+        // Ignore keepalive and any other unknown type
         if (msg.type !== 'keepalive') {
           console.warn('[sports] Unknown signaling message:', msg.type);
         }
@@ -383,10 +381,10 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start WebRTC: same as remote.js
+  // Start WebRTC: capture mic, build compressor+tone, and connect
   /////////////////////////////////////////////////////
   async function startWebRTC() {
-    // Step 1: capture mic with requested channel count
+    // 1) capture mic with requested channel count
     const channelCountMic = currentMode === 'speech' ? 1 : 2;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -401,13 +399,14 @@
       return;
     }
 
-    // Step 2: build a single AudioContext graph: micGain + toneGain → compressor → dest
+    // 2) build a single AudioContext graph: micGain + toneGain → compressor → dest
     setupAudioGraph(channelCountMic);
 
-    // Step 3: create PeerConnection if not exists
+    // 3) create PeerConnection if not exists
     if (!pc) {
       pc = new RTCPeerConnection(ICE_CONFIG);
 
+      // ───▶ Route incoming studio audio into hidden <audio> for playback
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
         if (!audioStudioElem.srcObject) {
@@ -434,25 +433,26 @@
         console.log('[sports] Connection state:', state);
       };
     } else {
+      // If PC already existed (mode-change), remove old sender
       if (audioSender) {
         pc.removeTrack(audioSender);
         audioSender = null;
       }
     }
 
-    // Step 4: add compressor output track
+    // 4) add compressor output track (mic or tone) for outbound audio
     audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
 
-    // Enable tone button now that audioSender is ready
+    // Enable GLITS‐tone button now that audioSender is ready
     toneBtn.disabled = false;
 
-    // Step 5: set default bitrate
+    // 5) set default bitrate (studio can override)
     setAudioBitrate(64000);
 
-    // Step 6: start the PPM meter
+    // 6) start the local PPM meter on the compressed output
     setupLocalMeter(processedStream);
 
-    // Step 7: create offer
+    // 7) create offer & send to studio
     let offer;
     try {
       offer = await pc.createOffer();
@@ -472,7 +472,8 @@
   }
 
   /////////////////////////////////////////////////////
-  // Build AudioContext graph: same as remote.js
+  // Build AudioContext graph: mic → micGain → compressor → dest
+  //                               tone → toneGain ↗
   /////////////////////////////////////////////////////
   function setupAudioGraph(channelCountMic) {
     if (audioContext) {
@@ -507,7 +508,7 @@
     compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
     compressor.release.setValueAtTime(0.25, audioContext.currentTime);
 
-    // 5) Create merger of 2 channels
+    // 5) Create merger (2 inputs → stereo)
     const merger = audioContext.createChannelMerger(2);
     micGain.connect(merger, 0, 0);
     toneGain.connect(merger, 0, 1);
