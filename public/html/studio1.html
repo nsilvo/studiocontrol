@@ -4,10 +4,11 @@
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Studio 1 Interface</title>
+  <title>Studio 1 Dashboard</title>
   <!-- Prevent /favicon.ico 404 -->
   <link rel="icon" href="data:," />
 
+  <!-- Main stylesheet for studio -->
   <link rel="stylesheet" href="../css/studio.css" />
 </head>
 <body>
@@ -15,20 +16,51 @@
     <h1>WebRTC Studio 1 Dashboard</h1>
   </header>
 
-  <!-- Immediately show the dashboard; no dropdown needed -->
+  <!-- Studio Dashboard: shows all requested features -->
   <div id="studio-dashboard">
     <main>
-      <div id="remotes-container">
-        <!-- Remote cards will be dynamically added here -->
-      </div>
+      <!-- 1. Global Controls: start/stop all recordings & upload recordings directory listing -->
+      <section id="global-controls">
+        <h2>Global Controls</h2>
+        <button id="start-all-recordings">Start All Recordings</button>
+        <button id="stop-all-recordings">Stop All Recordings</button>
+        <button id="upload-recordings-dir">Upload All Recorded Files</button>
+        <div id="global-upload-status"></div>
+      </section>
+
+      <!-- 2. Connected Remotes: each remote card is injected here by studio.js -->
+      <section id="remotes-section">
+        <h2>Connected Remotes</h2>
+        <div id="remotes-container">
+          <!-- studio.js will dynamically add one “remote-card” div per connected remote -->
+        </div>
+      </section>
+
+      <!-- 3. Live Mixed Waveform: displays a combined waveform of all incoming remote audio -->
+      <section id="live-waveform-section">
+        <h2>Live Mixed Waveform</h2>
+        <canvas id="live-waveform-canvas" width="800" height="200"></canvas>
+      </section>
+
+      <!-- 4. Upload Existing Recordings: allows browsing local files to upload -->
+      <section id="upload-section">
+        <h2>Upload Existing Recordings</h2>
+        <input type="file" id="upload-input" multiple />
+        <button id="upload-files-btn">Upload Selected Files</button>
+        <div id="upload-status"></div>
+      </section>
     </main>
   </div>
 
+  <!-- Shared utilities (e.g. createReconnectingWebSocket, getRTCConfig, createPPMMeter) -->
   <script src="../js/common.js"></script>
+
+  <!-- Identify this as “Studio 1” before loading studio.js -->
   <script>
-    // Tell studio.js that this is “studio1”
     window.STUDIO_ID = "Studio 1";
   </script>
+
+  <!-- Main studio logic: handles signaling, per-remote cards, PPM meters, stats, chat, recording, waveform, uploads -->
   <script src="../js/studio.js"></script>
 </body>
 </html>
