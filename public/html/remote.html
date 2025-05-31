@@ -5,36 +5,43 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Remote Interface</title>
-  <!-- Prevent browser from automatically requesting /favicon.ico -->
+  <!-- Prevent /favicon.ico 404 -->
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="css/remote.css" />
 </head>
 <body>
   <div id="container">
-    <div id="join-panel">
+    <!-- Step 1: Enter your display name -->
+    <div id="name-step">
       <h1>Join as Remote</h1>
       <div class="control-group">
-        <label for="name-input">Display Name:</label>
-        <input type="text" id="name-input" placeholder="Your Name" />
+        <label for="nameInput">Display Name:</label>
+        <input type="text" id="nameInput" placeholder="Your Name" />
       </div>
-      <button id="join-btn">Join</button>
+      <button id="nameSubmitBtn">Join</button>
     </div>
 
-    <div id="main-panel" class="hidden">
+    <!-- Step 2: Main UI, hidden until after name is submitted -->
+    <div id="main-ui" class="hidden">
       <h1>Remote Dashboard</h1>
       <div id="status">Awaiting call from studio...</div>
 
-      <div class="control-group">
-        <button id="tone-toggle-btn">Start Test Tone</button>
-        <button id="mute-toggle-btn">Mute Mic</button>
+      <div class="controls-row">
+        <button id="toneBtn">Start Test Tone</button>
+        <button id="muteSelfBtn">Mute Mic</button>
       </div>
-      <canvas id="ppm-meter"></canvas>
 
+      <!-- PPM Meter Canvas -->
+      <canvas id="meter-canvas" width="300" height="50"></canvas>
+
+      <!-- Chat Section -->
       <div id="chat-container">
         <h3>Chat</h3>
-        <div id="chat-messages"></div>
-        <input type="text" id="chat-input" placeholder="Type message..." />
-        <button id="chat-send-btn">Send</button>
+        <div id="chatWindow" class="chat-messages"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" placeholder="Type message..." />
+          <button id="sendChatBtn">Send</button>
+        </div>
       </div>
     </div>
   </div>
