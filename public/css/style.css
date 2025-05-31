@@ -10,14 +10,18 @@
   --accent: #4caf50;
   --accent-muted: #2e7d32;
   --meter-bg: #2a2a2a;
-  --meter-bar-speech: #4caf50;
-  --meter-bar-music: #2196f3;
+  --meter-green: #4caf50;
+  --meter-yellow: #ffeb3b;
+  --meter-red: #f44336;
   --border-color: #333;
   --button-bg: #3f51b5;
   --button-hover: #303f9f;
   --button-disabled: #555;
   --card-radius: 8px;
   --transition: 0.2s ease-in-out;
+
+  --meter-width: 20px;
+  --meter-height: 150px;
 }
 
 /* Simple reset */
@@ -27,11 +31,13 @@
   box-sizing: border-box;
 }
 
-html, body {
+html,
+body {
   height: 100%;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   background-color: var(--bg-main);
   color: var(--text-primary);
+  overflow-x: hidden;
 }
 
 a {
@@ -55,10 +61,10 @@ a:hover {
   color: #fff;
   border: none;
   border-radius: var(--card-radius);
-  padding: 8px 14px;
+  padding: 6px 12px;
   cursor: pointer;
   transition: background-color var(--transition);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
 }
 .btn:hover:not(:disabled) {
   background-color: var(--button-hover);
@@ -72,7 +78,7 @@ a:hover {
   background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--card-radius);
-  padding: 16px;
+  padding: 12px;
   margin-bottom: 20px;
   transition: box-shadow var(--transition);
 }
@@ -81,8 +87,8 @@ a:hover {
 }
 
 .section-title {
-  font-size: 1.2rem;
-  margin-bottom: 10px;
+  font-size: 1rem;
+  margin-bottom: 8px;
   color: var(--accent);
   border-left: 4px solid var(--accent);
   padding-left: 8px;
@@ -142,7 +148,7 @@ select {
   border-radius: var(--card-radius);
   padding: 6px 10px;
   color: var(--text-primary);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   transition: border-color var(--transition);
 }
 input:focus,
@@ -162,9 +168,40 @@ textarea {
 }
 
 label {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   color: var(--text-secondary);
   margin-right: 6px;
+}
+
+/* ==========================================================================
+   VU METER Styles (Vertical, Segmented)
+   ========================================================================== */
+
+.vu-meter-vertical {
+  width: var(--meter-width);
+  height: var(--meter-height);
+  background-color: var(--meter-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--card-radius);
+  position: relative;
+  margin: 0 10px;
+}
+
+.vu-meter-vertical canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* Legend on right side of meter */
+.vu-legend {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: var(--meter-height);
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-left: 4px;
 }
 
 /* ==========================================================================
@@ -225,8 +262,8 @@ label {
 }
 
 #controls .btn {
-  font-size: 0.9rem;
-  padding: 6px 12px;
+  font-size: 0.85rem;
+  padding: 6px 10px;
 }
 
 #meter-canvas {
@@ -258,7 +295,7 @@ label {
 }
 #chatWindow .chat-message {
   margin-bottom: 6px;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
 }
 #chatWindow .chat-message strong {
   color: var(--accent);
@@ -270,118 +307,85 @@ label {
   width: 80px;
 }
 
-#audio-studio {
-  width: 100%;
-  margin-top: 10px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-}
-
 /* ==========================================================================
    Studio Page Styles
    ========================================================================== */
 
-#chatContainer {
-  max-width: 800px;
-  margin: 20px auto;
-}
-#chatContainer h2 {
-  margin-bottom: 8px;
-  color: var(--accent);
-}
-#chatContainer #chatWindow {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-  height: 150px;
-  overflow-y: auto;
-  padding: 8px;
-  margin-bottom: 10px;
-}
-#chatContainer #chatInput {
-  width: calc(100% - 90px);
-  margin-right: 6px;
-}
-#chatContainer #sendChatBtn {
-  width: 80px;
-}
-
-#recordControls {
-  max-width: 800px;
-  margin: 20px auto;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-  padding: 16px;
-}
-#recordControls h2 {
-  margin-bottom: 8px;
-  color: var(--accent);
-}
-#recordControls .btn {
-  font-size: 0.9rem;
-  margin-right: 8px;
-}
-#recTimer {
-  font-weight: bold;
-  color: var(--accent);
-  margin-left: 10px;
-}
-#waveformCanvas {
-  width: 100%;
-  height: 180px;
-  background-color: var(--meter-bg);
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-  margin-top: 10px;
-}
-
+/* Move remotes to top */
 #remotesContainer {
-  max-width: 1000px;
-  margin: 20px auto;
-}
-
-.remote-entry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--card-radius);
-  padding: 16px;
-  margin-bottom: 20px;
+  margin: 20px auto;
+  max-width: 1000px;
 }
+
+/* Compact remote entry: ~250×150 */
+.remote-entry {
+  width: 250px;
+  height: 150px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--card-radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: box-shadow var(--transition);
+}
+.remote-entry:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
 .remote-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
 }
 .remote-name {
-  font-size: 1.1rem;
+  font-size: 0.9rem;
   font-weight: bold;
   color: var(--accent);
 }
 .remote-status {
-  font-size: 0.9rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
-  margin-left: 8px;
+  margin-left: 4px;
 }
+.remote-header .btn {
+  font-size: 0.75rem;
+  padding: 4px 8px;
+}
+
 .remote-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 10px;
+  gap: 6px;
+  font-size: 0.75rem;
 }
 .remote-controls label {
-  font-size: 0.9rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
 }
 .remote-controls select,
-.remote-controls input[type="number"] {
-  width: 80px;
+.remote-controls input[type='number'] {
+  width: 60px;
+  font-size: 0.75rem;
+  padding: 2px 4px;
 }
 
 .remote-meter,
 .jitter-graph,
 .bitrate-graph {
+  display: none; /* Hidden by default; toggled via JS */
+}
+.remote-meter.visible,
+.jitter-graph.visible,
+.bitrate-graph.visible {
   display: inline-block;
 }
 .remote-meter canvas,
@@ -390,40 +394,69 @@ label {
   background: var(--meter-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--card-radius);
+  width: 70px;
+  height: 30px;
 }
 .graph-label {
-  font-size: 0.8rem;
+  font-size: 0.65rem;
   text-align: center;
-  margin-top: 4px;
+  margin-top: 2px;
   color: var(--text-secondary);
 }
 
-.remote-audio {
-  width: 100%;
-  margin-top: 8px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--card-radius);
-  background: var(--bg-card);
+/* Hide audio players */
+.audio-hidden {
+  display: none !important;
 }
 
+/* Per‐remote chat (small area) */
 .chat-section {
   width: 100%;
-  margin-top: 10px;
+  margin-top: 4px;
 }
 .chat-section .chat-window {
-  height: 100px;
+  height: 50px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--card-radius);
-  padding: 6px;
-  margin-bottom: 6px;
+  padding: 4px;
+  margin-bottom: 4px;
   overflow-y: auto;
+  font-size: 0.7rem;
 }
-.chat-input {
-  width: calc(100% - 70px);
-  margin-right: 6px;
+.chat-section .chat-input {
+  width: calc(100% - 60px);
+  font-size: 0.7rem;
+  padding: 2px 4px;
 }
 .chat-send-btn {
-  width: 60px;
+  width: 50px;
+  font-size: 0.7rem;
+  padding: 2px 4px;
 }
 
+/* Recording & Chat areas: push below remotes */
+#chatContainer,
+#recordControls {
+  max-width: 800px;
+  margin: 20px auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--card-radius);
+  padding: 12px;
+}
+
+/* VU Meters container (horizontal row at top) */
+#vuMetersContainer {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  align-items: flex-end;
+  margin: 20px auto;
+  max-width: 1000px;
+}
+
+/* Hide studio audio element on remote page */
+#audio-studio {
+  display: none !important;
+}

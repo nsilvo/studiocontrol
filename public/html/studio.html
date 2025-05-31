@@ -6,15 +6,28 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <div class="card" style="max-width: 900px; margin: 20px auto;">
-    <h1>Studio Control</h1>
-    <div>
-      <span style="color: var(--text-secondary);">WebSocket:</span>
-      <span id="connStatus">Not connected</span>
+  <!-- 1) VU Meters for Studio Mic + Per-Remote -->
+  <div id="vuMetersContainer">
+    <!-- Studio Mic VU Meter -->
+    <div class="vu-meter-vertical card" id="studioMeterCard">
+      <div class="section-title">Studio Mic</div>
+      <canvas id="studioVuCanvas" width="20" height="150"></canvas>
+      <div class="vu-legend">
+        <div>10</div>
+        <div>8</div>
+        <div>6</div>
+        <div>4</div>
+        <div>2</div>
+        <div>0</div>
+      </div>
     </div>
+    <!-- Per-Remote meters will be injected here via JS -->
   </div>
 
-  <!-- Global Chat Section -->
+  <!-- 2) Connected Remotes appear here -->
+  <div id="remotesContainer"></div>
+
+  <!-- 3) Global Chat -->
   <div id="chatContainer" class="card">
     <h2>Studio Chat</h2>
     <div id="chatWindow"></div>
@@ -24,7 +37,7 @@
     </div>
   </div>
 
-  <!-- Recording Controls -->
+  <!-- 4) Recording Controls -->
   <div id="recordControls" class="card">
     <h2>Recording Controls</h2>
     <button id="recordBtn" class="btn">Start Recording</button>
@@ -33,66 +46,79 @@
     <canvas id="waveformCanvas" class="mt-10"></canvas>
   </div>
 
-  <!-- Connected Remotes List -->
-  <div class="card" style="max-width: 1000px; margin: 20px auto;">
-    <h2>Connected Remotes</h2>
-    <div id="remotesContainer"></div>
-  </div>
-
-  <!-- Template for a single remote entry -->
+  <!-- 5) Template for a single remote entry -->
   <template id="remoteEntryTemplate">
     <div class="remote-entry">
       <div class="remote-header">
         <div class="flex-row align-center gap-10">
           <span class="remote-name">Remote Name</span>
-          <span class="remote-status">(status)</span>
+          <span class="remote-status">(waiting)</span>
         </div>
-        <div class="flex-row gap-10">
+        <div class="flex-row gap-6">
           <button class="callRemoteBtn btn">Call</button>
           <button class="muteRemoteBtn btn">Mute</button>
-          <button class="kickRemoteBtn btn">Kick</button>
         </div>
       </div>
 
-      <div class="remote-controls flex-row flex-wrap gap-10">
-        <label for="mode">Mode:</label>
-        <select class="modeSelect">
-          <option value="speech">Speech</option>
-          <option value="music" selected>Music</option>
-        </select>
-
-        <label for="bitrate">Bitrate:</label>
-        <input type="number" class="bitrateInput" min="1000" max="128000" value="64000" />
-
-        <div class="remote-meter">
-          <canvas width="150" height="20"></canvas>
-          <div class="graph-label">PPM Meter</div>
+      <!-- Vertical VU Meter for this remote -->
+      <div class="flex-row align-center mt-6">
+        <div class="vu-meter-vertical" style="margin-right:8px;">
+          <canvas class="remoteVuCanvas" width="20" height="150"></canvas>
+          <div class="vu-legend">
+            <div>10</div>
+            <div>8</div>
+            <div>6</div>
+            <div>4</div>
+            <div>2</div>
+            <div>0</div>
+          </div>
         </div>
 
-        <div class="jitter-graph">
-          <canvas width="150" height="20"></canvas>
+        <!-- Small control block -->
+        <div class="flex-col gap-4">
+          <div class="remote-controls flex-row gap-4">
+            <label>Mode:</label>
+            <select class="modeSelect">
+              <option value="speech">Speech</option>
+              <option value="music" selected>Music</option>
+            </select>
+          </div>
+          <div class="remote-controls flex-row gap-4">
+            <label>Bitrate:</label>
+            <input type="number" class="bitrateInput" min="1000" max="128000" value="64000" />
+          </div>
+          <button class="toggleStatsBtn btn">Toggle Stats</button>
+        </div>
+      </div>
+
+      <!-- Hidden by default, shown when “Toggle Stats” clicked -->
+      <div class="flex-row justify-between mt-6">
+        <div class="remote-meter" style="display:none;">
+          <canvas width="70" height="30"></canvas>
+          <div class="graph-label">PPM</div>
+        </div>
+        <div class="jitter-graph" style="display:none;">
+          <canvas width="70" height="30"></canvas>
           <div class="graph-label">Jitter</div>
         </div>
-
-        <div class="bitrate-graph">
-          <canvas width="150" height="20"></canvas>
+        <div class="bitrate-graph" style="display:none;">
+          <canvas width="70" height="30"></canvas>
           <div class="graph-label">Bitrate</div>
         </div>
+      </div>
 
-        <audio class="remote-audio mt-10" controls autoplay></audio>
-
-        <div class="chat-section mt-10" style="width: 100%;">
-          <div class="chat-window"></div>
-          <div class="flex-row mt-6">
-            <input type="text" class="chat-input" placeholder="Type message..." />
-            <button class="chat-send-btn btn">Send</button>
-          </div>
+      <!-- Per‐remote chat area (small) -->
+      <div class="chat-section mt-6">
+        <div class="chat-window"></div>
+        <div class="flex-row mt-4">
+          <input type="text" class="chat-input" placeholder="Type..." />
+          <button class="chat-send-btn btn">Send</button>
         </div>
       </div>
     </div>
   </template>
 
-  <!-- Pre‐set this page’s studio ID (if you want multiple studios) -->
+  <!-- Pre‐set this page’s studio ID -->
   <script>
     window.STUDIO_ID = "Studio";
   </script>

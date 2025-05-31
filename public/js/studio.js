@@ -1,15 +1,21 @@
 /**
  * public/js/studio.js
  *
- * - Manages WebSocket signaling and RTCPeerConnections for multiple remotes.
- * - Captures the studio mic and adds that track to every remote’s PC → remotes hear studio.
- * - Each remote‐entry now has an <audio> element so the studio hears the remote.
- * - Implements global/studio chat and per‐remote chat.
- * - Multi‐track recording: captures each remote’s audio + mixed studio feed → uploads to /upload.
+ * - Captures studio mic → drives #studioVuCanvas vertical VU meter.
+ * - For each remote:
+ *     • Creates a compact 250×150 card (with a vertical VU meter, Mute/Unmute, Toggle Stats).
+ *     • Able to call, mute/unmute, mode‐select, bitrate input, per‐remote chat.
+ *     • Hidden bitrate/jitter graphs that show when “Toggle Stats” clicked.
+ * - All remote cards live under #remotesContainer at top of page.
+ * - “VU Meters” row at top shows #studioVuCanvas + one .remoteVuCanvas per remote.
+ * - Multi‐track recording (unchanged).
+ * - Global chat (unchanged).
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // ICE servers configuration (TURN/STUN)
+  // ────────────────────────────────────────────────────────────────────────
+  // 1) ICE & WS CONFIG
+  // ────────────────────────────────────────────────────────────────────────
   const ICE_CONFIG = {
     iceServers: [
       {
@@ -19,62 +25,95 @@ document.addEventListener('DOMContentLoaded', () => {
       },
     ],
   };
-
   const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
   let ws = null;
 
-  // peers: Map<remoteId, { pc, entryEl, audioContext, analyserL, analyserR, rafId, mediaStream }>
+  // peers: Map<remoteId, { pc, entryEl, audioContext, analyserRec, rafIdRec, mediaStream, muted }>
   const peers = new Map();
-  // mediaStreams: Map<remoteId, MediaStream>  (for per‐remote recording)
+  // mediaStreams: Map<remoteId, MediaStream>
   const mediaStreams = new Map();
   // remoteRecorders: Map<remoteId, MediaRecorder>
   const remoteRecorders = new Map();
 
-  // ===== STUDIO MIC & MIXER SETUP =====
-  // 1) We capture studio mic once (stereo or mono as is).
-  // 2) Whenever a new remote PC is created, we add that mic track to it so remotes hear us.
-  // 3) We also mix incoming remote streams into a master destination so we can record them.
-  let studioMicStream = null;            // MediaStream from getUserMedia({audio:true})
-  let studioAudioContext = null;         // AudioContext for mixing incoming remote streams
-  let masterDestination = null;          // MediaStreamDestination for recording the “studio mix”
+  // ────────────────────────────────────────────────────────────────────────
+  // 2) STUDIO MIC & VU METER SETUP
+  // ────────────────────────────────────────────────────────────────────────
+  let studioMicStream = null;
+  let studioAudioContext = null;
+  let studioAnalyser = null;
+  let studioRMSData = null;
+  let studioRafId = null;
 
-  // ===== DOM REFERENCES =====
-  const connStatusSpan     = document.getElementById('connStatus');
-  const remotesContainer   = document.getElementById('remotesContainer');
-  const remoteEntryTemplate= document.getElementById('remoteEntryTemplate');
+  const studioVuCanvas = document.getElementById('studioVuCanvas');
+  const studioVuCtx = studioVuCanvas.getContext('2d');
+  const vuWidth = studioVuCanvas.width;
+  const vuHeight = studioVuCanvas.height;
 
-  // Global Chat Elements
-  const chatWindowAll      = document.getElementById('chatWindow');
-  const chatInputAll       = document.getElementById('chatInput');
-  const chatSendBtnAll     = document.getElementById('sendChatBtn');
-
-  // Recording Controls
-  const recordBtn          = document.getElementById('recordBtn');
-  const stopRecordBtn      = document.getElementById('stopRecordBtn');
-  const recorderTimerSpan  = document.getElementById('recTimer');
-  const waveformCanvas     = document.getElementById('waveformCanvas');
-
-  let studioRecorder       = null;
-  let recordingStartTime   = null;
-  let recorderTimerInterval= null;
-
-  // ===================================================================
-  // 1) INITIALIZE STUDIO MIC
-  // ===================================================================
-  // Request microphone access immediately, so we can add the mic track to every PC.
   async function initStudioMic() {
     try {
       studioMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      console.log('[studio] Studio mic stream acquired');
+      // Create analyser for studio mic
+      studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      const source = studioAudioContext.createMediaStreamSource(studioMicStream);
+      studioAnalyser = studioAudioContext.createAnalyser();
+      studioAnalyser.fftSize = 256;
+      source.connect(studioAnalyser);
+      studioRMSData = new Uint8Array(studioAnalyser.frequencyBinCount);
+      drawStudioVuMeter();
+      console.log('[studio] Studio mic & VU meter initialized');
     } catch (err) {
       console.error('[studio] Error accessing microphone:', err);
-      alert('Microphone access is required for the studio to send audio to remotes.');
+      alert('Microphone access is required for the studio VU meter.');
     }
   }
 
-  // ===================================================================
-  // 2) GLOBAL CHAT HELPERS
-  // ===================================================================
+  function drawStudioVuMeter() {
+    if (!studioAnalyser) return;
+    studioAnalyser.getByteFrequencyData(studioRMSData);
+    // Compute RMS of entire spectrum
+    let sum = 0;
+    for (let i = 0; i < studioRMSData.length; i++) {
+      sum += studioRMSData[i] * studioRMSData[i];
+    }
+    const rms = Math.sqrt(sum / studioRMSData.length) / 255; // 0..1
+
+    // Clear canvas
+    studioVuCtx.clearRect(0, 0, vuWidth, vuHeight);
+
+    // Draw vertical segmented meter
+    const segments = 10;
+    const segHeight = vuHeight / segments;
+    for (let i = 0; i < segments; i++) {
+      const threshold = (i + 1) / segments; // 0.1, 0.2, ..., 1.0
+      let color = varColor(threshold);
+      const y = vuHeight - (i + 1) * segHeight;
+      if (rms >= threshold) {
+        studioVuCtx.fillStyle = color;
+        studioVuCtx.fillRect(0, y, vuWidth, segHeight - 2);
+      } else {
+        // draw background segment border
+        studioVuCtx.strokeStyle = '#333';
+        studioVuCtx.strokeRect(0, y, vuWidth, segHeight - 2);
+      }
+    }
+
+    studioRafId = requestAnimationFrame(drawStudioVuMeter);
+  }
+
+  // Utility: pick green/yellow/red based on level
+  function varColor(level) {
+    if (level < 0.6) return getComputedStyle(document.documentElement).getPropertyValue('--meter-green');
+    if (level < 0.8) return getComputedStyle(document.documentElement).getPropertyValue('--meter-yellow');
+    return getComputedStyle(document.documentElement).getPropertyValue('--meter-red');
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // 3) GLOBAL CHAT
+  // ────────────────────────────────────────────────────────────────────────
+  const chatWindowAll = document.getElementById('chatWindow');
+  const chatInputAll = document.getElementById('chatInput');
+  const chatSendBtnAll = document.getElementById('sendChatBtn');
+
   function appendGlobalChatMessage(sender, text) {
     const div = document.createElement('div');
     div.textContent = `[${sender}]: ${text}`;
@@ -85,37 +124,30 @@ document.addEventListener('DOMContentLoaded', () => {
   chatSendBtnAll.onclick = () => {
     const text = chatInputAll.value.trim();
     if (!text) return;
-    // Send to server; server will broadcast to all studios/remotes
     ws.send(
       JSON.stringify({
         type: 'chat',
         fromRole: 'studio',
         fromId: window.STUDIO_ID || 'Studio',
         text,
-        target: 'all'
+        target: 'all',
       })
     );
     appendGlobalChatMessage('You', text);
     chatInputAll.value = '';
   };
 
-  // ===================================================================
-  // 3) INITIALIZE WEBSOCKET
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 4) WEBSOCKET SIGNALING
+  // ────────────────────────────────────────────────────────────────────────
   function initWebSocket() {
     ws = new WebSocket(WS_URL);
+    const connStatusSpan = document.getElementById('connStatus');
 
     ws.onopen = () => {
       console.log('[studio] WS opened');
-      connStatusSpan.textContent = 'WS connected';
-      // Join as studio (include the ID so server tags chat/logs properly)
-      ws.send(
-        JSON.stringify({
-          type: 'join',
-          role: 'studio',
-          studioId: window.STUDIO_ID || 'Studio'
-        })
-      );
+      connStatusSpan.textContent = 'Connected';
+      ws.send(JSON.stringify({ type: 'join', role: 'studio', studioId: window.STUDIO_ID || 'Studio' }));
     };
 
     ws.onmessage = (evt) => {
@@ -131,14 +163,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     ws.onclose = () => {
       console.warn('[studio] WS closed. Reconnecting in 5s…');
-      connStatusSpan.textContent = 'WS disconnected. Reconnecting…';
+      connStatusSpan.textContent = 'Disconnected. Reconnecting…';
       setTimeout(initWebSocket, 5000);
-      // Tear down all peers
+      // Teardown all peers
       for (let pid of peers.keys()) {
         teardownPeer(pid);
       }
       peers.clear();
       mediaStreams.clear();
+      // Remove remote VU meters
+      const vuContainer = document.getElementById('vuMetersContainer');
+      vuContainer.querySelectorAll('.remote-meter-card').forEach((el) => el.remove());
     };
 
     ws.onerror = (err) => {
@@ -150,35 +185,25 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleSignalingMessage(msg) {
     switch (msg.type) {
       case 'new-remote':
-        // { type:'new-remote', id, name }
-        console.log(`[studio] Remote joined: ${msg.name} (${msg.id})`);
         setupNewRemote(msg.id, msg.name);
         break;
 
       case 'offer':
-        // { type:'offer', from: remoteId, sdp }
-        if (peers.has(msg.from)) {
-          handleOffer(msg.from, msg.sdp);
-        }
+        if (peers.has(msg.from)) handleOffer(msg.from, msg.sdp);
         break;
 
       case 'candidate':
-        // { type:'candidate', from: remoteId, candidate }
-        // Only add candidate if PC exists && remoteDescription is set
         if (peers.has(msg.from) && peers.get(msg.from).pc.remoteDescription) {
           handleCandidate(msg.from, msg.candidate);
         }
         break;
 
       case 'remote-disconnected':
-        // { type:'remote-disconnected', id }
-        console.log(`[studio] Remote disconnected: ${msg.id}`);
         teardownPeer(msg.id);
         break;
 
       case 'chat':
-        // { type:'chat', fromRole:'remote'|'studio', fromId, text }
-        appendGlobalChatMessage(msg.fromId || 'Anonymous', msg.text);
+        appendGlobalChatMessage(msg.fromId || 'Remote', msg.text);
         break;
 
       default:
@@ -186,282 +211,297 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ===================================================================
-  // 4) SET UP A NEW REMOTE ENTRY
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 5) SET UP A NEW REMOTE CARD
+  // ────────────────────────────────────────────────────────────────────────
   function setupNewRemote(remoteId, remoteName) {
-    // 1) Clone the template
-    const clone = remoteEntryTemplate.content.cloneNode(true);
+    // 5a) VU Meter Card for this remote
+    const vuContainer = document.getElementById('vuMetersContainer');
+    const remoteVuCard = document.createElement('div');
+    remoteVuCard.className = 'vu-meter-vertical card remote-meter-card';
+    remoteVuCard.id = `vuCard-${remoteId}`;
+    remoteVuCard.innerHTML = `
+      <div class="section-title">${remoteName}</div>
+      <canvas class="remoteVuCanvas" width="20" height="150"></canvas>
+      <div class="vu-legend">
+        <div>10</div>
+        <div>8</div>
+        <div>6</div>
+        <div>4</div>
+        <div>2</div>
+        <div>0</div>
+      </div>
+    `;
+    vuContainer.appendChild(remoteVuCard);
+    const remoteVuCanvas = remoteVuCard.querySelector('.remoteVuCanvas');
+    const remoteVuCtx = remoteVuCanvas.getContext('2d');
+
+    // 5b) Clone the remoteEntryTemplate
+    const clone = document.getElementById('remoteEntryTemplate').content.cloneNode(true);
     const entryEl = clone.querySelector('.remote-entry');
     entryEl.id = `remote-${remoteId}`;
+    entryEl.querySelector('.remote-name').textContent = remoteName;
+    entryEl.querySelector('.remote-status').textContent = '(waiting)';
 
-    const nameEl       = entryEl.querySelector('.remote-name');
-    const statusEl     = entryEl.querySelector('.remote-status');
-    const callBtn      = entryEl.querySelector('.callRemoteBtn');
-    const muteBtn      = entryEl.querySelector('.muteRemoteBtn');
-    const kickBtn      = entryEl.querySelector('.kickRemoteBtn');
-    const modeSelect   = entryEl.querySelector('.modeSelect');
+    const callBtn = entryEl.querySelector('.callRemoteBtn');
+    const muteBtn = entryEl.querySelector('.muteRemoteBtn');
+    const modeSelect = entryEl.querySelector('.modeSelect');
     const bitrateInput = entryEl.querySelector('.bitrateInput');
-    const meterCanvas  = entryEl.querySelector('.remote-meter canvas');
+    const toggleStatsBtn = entryEl.querySelector('.toggleStatsBtn');
+    const ppmCanvas = entryEl.querySelector('.remote-meter canvas');
     const jitterCanvas = entryEl.querySelector('.jitter-graph canvas');
-    const bitrateCanvas= entryEl.querySelector('.bitrate-graph canvas');
-    const audioEl      = entryEl.querySelector('.remote-audio');
-    const chatWindow   = entryEl.querySelector('.chat-window');
-    const chatInput    = entryEl.querySelector('.chat-input');
-    const chatSendBtn  = entryEl.querySelector('.chat-send-btn');
+    const bitrateCanvas = entryEl.querySelector('.bitrate-graph canvas');
+    const chatWindow = entryEl.querySelector('.chat-window');
+    const chatInput = entryEl.querySelector('.chat-input');
+    const chatSendBtn = entryEl.querySelector('.chat-send-btn');
 
-    nameEl.textContent    = remoteName;
-    statusEl.textContent  = 'Waiting…';
+    document.getElementById('remotesContainer').appendChild(entryEl);
 
-    remotesContainer.appendChild(entryEl);
-
-    // 2) Button handlers
-    callBtn.onclick = () => {
-      ws.send(JSON.stringify({ type: 'ready-for-offer', target: remoteId }));
-      callBtn.disabled = true;
-      statusEl.textContent = 'Calling…';
-    };
-
-    muteBtn.onclick = () => {
-      ws.send(JSON.stringify({ type: 'mute-remote', target: remoteId }));
-      muteBtn.disabled = true;
-      statusEl.textContent = 'Muted';
-    };
-
-    kickBtn.onclick = () => {
-      ws.send(JSON.stringify({ type: 'kick-remote', target: remoteId }));
-      kickBtn.disabled = true;
-      statusEl.textContent = 'Kicked';
-    };
-
-    modeSelect.onchange = () => {
-      ws.send(JSON.stringify({
-        type: 'mode-update',
-        target: remoteId,
-        mode: modeSelect.value
-      }));
-    };
-
-    bitrateInput.onchange = () => {
-      const br = parseInt(bitrateInput.value, 10);
-      ws.send(JSON.stringify({
-        type: 'bitrate-update',
-        target: remoteId,
-        bitrate: br
-      }));
-    };
-
-    chatSendBtn.onclick = () => {
-      const text = chatInput.value.trim();
-      if (!text) return;
-      ws.send(JSON.stringify({
-        type: 'chat',
-        fromRole: 'studio',
-        fromId: window.STUDIO_ID || 'Studio',
-        target: 'remote',
-        targetId: remoteId,
-        text
-      }));
-      appendPerRemoteChatMessage(chatWindow, 'You', text);
-      chatInput.value = '';
-    };
-
-    // 3) Create PeerConnection and store placeholders
+    // 5c) PeerConnection setup
     const pc = new RTCPeerConnection(ICE_CONFIG);
+    let isMuted = false;
 
-    // 3a) If we already have the studio mic, immediately add it so remote hears us
+    // 5d) Add studio mic track to this PC so remote hears us
     if (studioMicStream) {
-      studioMicStream.getAudioTracks().forEach((track) => {
-        pc.addTrack(track, studioMicStream);
-      });
+      studioMicStream.getAudioTracks().forEach((t) => pc.addTrack(t, studioMicStream));
     }
 
-    // 3b) When we get a track from this remote, wire it into the <audio> element & mixer
+    // 5e) ontrack: remote’s audio → play & meter
+    const audioEl = new Audio();
+    audioEl.autoplay = true;
     pc.ontrack = (evt) => {
       const [remoteStream] = evt.streams;
-      statusEl.textContent = 'Connected';
+      entryEl.querySelector('.remote-status').textContent = '(connected)';
+      audioEl.srcObject = remoteStream;
 
-      // 3b-i) Send remote audio into the <audio> so studio can hear them
-      if (audioEl.srcObject !== remoteStream) {
-        audioEl.srcObject = remoteStream;
-      }
+      // Start per‐remote VU metering
+      if (!peers.get(remoteId).analyserRec) {
+        const meterAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+        const meterSrc = meterAudioCtx.createMediaStreamSource(remoteStream);
+        const analyserRec = meterAudioCtx.createAnalyser();
+        analyserRec.fftSize = 256;
+        meterSrc.connect(analyserRec);
+        const rmsDataRec = new Uint8Array(analyserRec.frequencyBinCount);
 
-      // 3b-ii) Set up the master mixer if not yet done
-      if (!studioAudioContext) {
-        studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-        masterDestination = studioAudioContext.createMediaStreamDestination();
-      }
+        function drawRemoteVu() {
+          analyserRec.getByteFrequencyData(rmsDataRec);
+          let sum = 0;
+          for (let i = 0; i < rmsDataRec.length; i++) sum += rmsDataRec[i] * rmsDataRec[i];
+          const rms = Math.sqrt(sum / rmsDataRec.length) / 255;
 
-      // 3b-iii) Mix this remote’s stream into masterDestination for recording
-      const srcNode = studioAudioContext.createMediaStreamSource(remoteStream);
-      srcNode.connect(masterDestination);
-
-      // 3b-iv) Save for per‐remote recording
-      mediaStreams.set(remoteId, remoteStream);
-
-      // 3b-v) Set up per‐remote PPM meter
-      const meterAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-      const meterSrc = meterAudioCtx.createMediaStreamSource(remoteStream);
-      const splitter = meterAudioCtx.createChannelSplitter(2);
-
-      const analyserL = meterAudioCtx.createAnalyser();
-      analyserL.fftSize = 256;
-      const analyserR = meterAudioCtx.createAnalyser();
-      analyserR.fftSize = 256;
-
-      splitter.connect(analyserL, 0);
-      splitter.connect(analyserR, 1);
-
-      function drawMeter() {
-        const bufLen = analyserL.frequencyBinCount;
-        const dataL = new Uint8Array(bufLen);
-        const dataR = new Uint8Array(bufLen);
-        analyserL.getByteFrequencyData(dataL);
-        analyserR.getByteFrequencyData(dataR);
-
-        let sumL = 0, sumR = 0;
-        for (let i = 0; i < bufLen; i++) {
-          sumL += dataL[i] * dataL[i];
-          sumR += dataR[i] * dataR[i];
+          // Clear
+          remoteVuCtx.clearRect(0, 0, vuWidth, vuHeight);
+          // Draw segments
+          const segments = 10;
+          const segHeight = vuHeight / segments;
+          for (let i = 0; i < segments; i++) {
+            const threshold = (i + 1) / segments;
+            const color = varColor(threshold);
+            const y = vuHeight - (i + 1) * segHeight;
+            if (rms >= threshold) {
+              remoteVuCtx.fillStyle = color;
+              remoteVuCtx.fillRect(0, y, vuWidth, segHeight - 2);
+            } else {
+              remoteVuCtx.strokeStyle = '#333';
+              remoteVuCtx.strokeRect(0, y, vuWidth, segHeight - 2);
+            }
+          }
+          const raf = requestAnimationFrame(drawRemoteVu);
+          peers.get(remoteId).rafIdRec = raf;
         }
-        const rmsL = Math.sqrt(sumL / bufLen) / 255;
-        const rmsR = Math.sqrt(sumR / bufLen) / 255;
+        drawRemoteVu();
 
-        const ctx = meterCanvas.getContext('2d');
-        ctx.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
-
-        const barL = Math.round(rmsL * meterCanvas.width);
-        ctx.fillStyle = '#4caf50';
-        ctx.fillRect(0, 0, barL, meterCanvas.height / 2 - 2);
-
-        const barR = Math.round(rmsR * meterCanvas.width);
-        ctx.fillStyle = '#2196f3';
-        ctx.fillRect(0, meterCanvas.height / 2 + 2, barR, meterCanvas.height / 2 - 2);
-
-        const rafId = requestAnimationFrame(drawMeter);
-        peers.get(remoteId).rafId = rafId;
-      }
-
-      meterSrc.connect(splitter);
-      drawMeter();
-
-      // 3b-vi) Placeholder “jitter” & “bitrate” canvases (clear each frame)
-      const jitterCtx  = jitterCanvas.getContext('2d');
-      const bitrateCtx = bitrateCanvas.getContext('2d');
-      function drawStats() {
-        jitterCtx.clearRect(0, 0, jitterCanvas.width, jitterCanvas.height);
-        bitrateCtx.clearRect(0, 0, bitrateCanvas.width, bitrateCanvas.height);
-        requestAnimationFrame(drawStats);
-      }
-      drawStats();
-
-      // 3b-vii) Update stored peer data
-      const peerData = peers.get(remoteId);
-      if (peerData) {
-        peerData.audioContext = meterAudioCtx;
-        peerData.analyserL   = analyserL;
-        peerData.analyserR   = analyserR;
+        // Save analyserRef
+        const peerData = peers.get(remoteId);
+        peerData.analyserRec = analyserRec;
+        peerData.rmsDataRec = rmsDataRec;
         peerData.mediaStream = remoteStream;
       }
     };
 
-    // 3c) ICE candidate handler
+    // 5f) ICE candidate → server
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        ws.send(JSON.stringify({
-          type: 'candidate',
-          from: 'studio',
-          target: remoteId,
-          candidate: e.candidate
-        }));
+        ws.send(
+          JSON.stringify({
+            type: 'candidate',
+            from: 'studio',
+            target: remoteId,
+            candidate: e.candidate,
+          })
+        );
       }
     };
 
-    // 3d) Connection state change
+    // 5g) connection state → update status
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      statusEl.textContent = `WebRTC: ${state}`;
       if (['disconnected', 'failed', 'closed'].includes(state)) {
         teardownPeer(remoteId);
       }
     };
 
-    // 4) Store peer data in the map
+    // 5h) Store peer data
     peers.set(remoteId, {
       pc,
       entryEl,
-      audioContext: null,
-      analyserL: null,
-      analyserR: null,
-      rafId: null,
-      mediaStream: null
+      analyserRec: null,
+      rmsDataRec: null,
+      rafIdRec: null,
+      mediaStream: null,
+      muted: false,
     });
+
+    // 5i) Button Handlers
+
+    // Call (sends “ready-for-offer”)
+    callBtn.onclick = () => {
+      ws.send(JSON.stringify({ type: 'ready-for-offer', target: remoteId }));
+      callBtn.disabled = true;
+      entryEl.querySelector('.remote-status').textContent = '(calling…)';
+    };
+
+    // Mute / Unmute toggle
+    muteBtn.onclick = () => {
+      const peerData = peers.get(remoteId);
+      if (!peerData) return;
+      peerData.muted = !peerData.muted;
+      ws.send(
+        JSON.stringify({
+          type: 'mute-remote',
+          target: remoteId,
+          muted: peerData.muted,
+        })
+      );
+      muteBtn.textContent = peerData.muted ? 'Unmute' : 'Mute';
+      entryEl.querySelector('.remote-status').textContent = peerData.muted ? '(muted)' : '(connected)';
+    };
+
+    // Mode change
+    modeSelect.onchange = () => {
+      ws.send(
+        JSON.stringify({
+          type: 'mode-update',
+          target: remoteId,
+          mode: modeSelect.value,
+        })
+      );
+    };
+
+    // Bitrate change
+    bitrateInput.onchange = () => {
+      const br = parseInt(bitrateInput.value, 10);
+      ws.send(
+        JSON.stringify({
+          type: 'bitrate-update',
+          target: remoteId,
+          bitrate: br,
+        })
+      );
+    };
+
+    // Toggle Stats (show/hide PPM, Jitter, Bitrate graphs)
+    toggleStatsBtn.onclick = () => {
+      const ppmDiv = entryEl.querySelector('.remote-meter');
+      const jitDiv = entryEl.querySelector('.jitter-graph');
+      const brDiv = entryEl.querySelector('.bitrate-graph');
+      [ppmDiv, jitDiv, brDiv].forEach((div) => {
+        if (div.style.display === 'none' || div.style.display === '') {
+          div.style.display = 'inline-block';
+        } else {
+          div.style.display = 'none';
+        }
+      });
+    };
+
+    // Per-remote chat
+    chatSendBtn.onclick = () => {
+      const text = chatInput.value.trim();
+      if (!text) return;
+      ws.send(
+        JSON.stringify({
+          type: 'chat',
+          fromRole: 'studio',
+          fromId: window.STUDIO_ID || 'Studio',
+          target: 'remote',
+          targetId: remoteId,
+          text,
+        })
+      );
+      appendPerRemoteChatMessage(chatWindow, 'You', text);
+      chatInput.value = '';
+    };
   }
 
-  // ===================================================================
-  // 5) HANDLE INCOMING OFFER FROM REMOTE
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 6) HANDLE INCOMING OFFER FROM REMOTE
+  // ────────────────────────────────────────────────────────────────────────
   async function handleOffer(remoteId, sdp) {
     const data = peers.get(remoteId);
     if (!data) return;
     const pc = data.pc;
     try {
-      // 5a) Set remote description (the offer from the remote)
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-
-      // 5b) Now that studio has the remote’s offer, our mic track is already added (see setupNewRemote).
-      //      Create an answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-
-      // 5c) Send that answer back to the remote
-      ws.send(JSON.stringify({
-        type: 'answer',
-        from: 'studio',
-        target: remoteId,
-        sdp: pc.localDescription.sdp
-      }));
-    } catch (e) {
-      console.error(`[studio] handleOffer error for ${remoteId}:`, e);
+      ws.send(
+        JSON.stringify({
+          type: 'answer',
+          from: 'studio',
+          target: remoteId,
+          sdp: pc.localDescription.sdp,
+        })
+      );
+      data.entryEl.querySelector('.remote-status').textContent = '(connected)';
+    } catch (err) {
+      console.error(`[studio] handleOffer error for ${remoteId}:`, err);
     }
   }
 
-  // ===================================================================
-  // 6) HANDLE INCOMING ICE CANDIDATE
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 7) HANDLE INCOMING ICE CANDIDATE
+  // ────────────────────────────────────────────────────────────────────────
   async function handleCandidate(remoteId, candidate) {
     const data = peers.get(remoteId);
-    if (!data || !data.pc.remoteDescription) {
-      // If no PC or remoteDescription yet, skip
-      return;
-    }
+    if (!data || !data.pc.remoteDescription) return;
     try {
       await data.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) {
-      console.error(`[studio] addIceCandidate error for ${remoteId}:`, e);
+    } catch (err) {
+      console.error(`[studio] addIceCandidate error for ${remoteId}:`, err);
     }
   }
 
-  // ===================================================================
-  // 7) TEARDOWN A REMOTE
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 8) TEARDOWN A REMOTE
+  // ────────────────────────────────────────────────────────────────────────
   function teardownPeer(remoteId) {
     const data = peers.get(remoteId);
     if (!data) return;
-    const { pc, entryEl, audioContext, rafId } = data;
-    if (rafId) cancelAnimationFrame(rafId);
-    if (audioContext) audioContext.close();
+    const { pc, entryEl, rafIdRec } = data;
+    if (rafIdRec) cancelAnimationFrame(rafIdRec);
     if (pc) pc.close();
-    if (entryEl && remotesContainer.contains(entryEl)) {
-      remotesContainer.removeChild(entryEl);
+    if (entryEl && document.getElementById('remotesContainer').contains(entryEl)) {
+      entryEl.remove();
     }
+    // Remove the VU meter card
+    const vuCard = document.getElementById(`vuCard-${remoteId}`);
+    if (vuCard) vuCard.remove();
     peers.delete(remoteId);
     mediaStreams.delete(remoteId);
   }
 
-  // ===================================================================
-  // 8) RECORDING CONTROLS
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 9) RECORDING CONTROLS (Unchanged)
+  // ────────────────────────────────────────────────────────────────────────
+  const recordBtn = document.getElementById('recordBtn');
+  const stopRecordBtn = document.getElementById('stopRecordBtn');
+  const recorderTimerSpan = document.getElementById('recTimer');
+  const waveformCanvas = document.getElementById('waveformCanvas');
+
+  let studioRecorder = null;
+  let recordingStartTime = null;
+  let recorderTimerInterval = null;
+
   recordBtn.onclick = () => startRecording();
   stopRecordBtn.onclick = () => stopRecording();
 
@@ -470,22 +510,15 @@ document.addEventListener('DOMContentLoaded', () => {
       alert('No remotes connected.');
       return;
     }
-
     recordBtn.disabled = true;
     stopRecordBtn.disabled = false;
-
-    // Create master mixer if not yet created
     if (!studioAudioContext) {
       studioAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       masterDestination = studioAudioContext.createMediaStreamDestination();
     }
-
-    // Attach each remote’s incoming stream to the mixer
     mediaStreams.forEach((stream, remoteId) => {
       const src = studioAudioContext.createMediaStreamSource(stream);
       src.connect(masterDestination);
-
-      // Record each remote individually
       const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       const chunks = [];
       recorder.ondataavailable = (e) => {
@@ -498,8 +531,6 @@ document.addEventListener('DOMContentLoaded', () => {
       recorder.start();
       remoteRecorders.set(remoteId, recorder);
     });
-
-    // Record the mixed “studio feed” (all remotes combined)
     studioRecorder = new MediaRecorder(masterDestination.stream, { mimeType: 'audio/webm' });
     const studioChunks = [];
     studioRecorder.ondataavailable = (e) => {
@@ -510,7 +541,6 @@ document.addEventListener('DOMContentLoaded', () => {
       uploadBlob(blob, `studio-mix-${Date.now()}.webm`);
     };
     studioRecorder.start();
-
     recordingStartTime = Date.now();
     recorderTimerInterval = setInterval(updateTimer, 1000);
   }
@@ -520,14 +550,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (rec && rec.state !== 'inactive') rec.stop();
     });
     remoteRecorders.clear();
-
     if (studioRecorder && studioRecorder.state !== 'inactive') {
       studioRecorder.stop();
     }
-
     clearInterval(recorderTimerInterval);
     recorderTimerSpan.textContent = '00:00';
-
     recordBtn.disabled = false;
     stopRecordBtn.disabled = true;
   }
@@ -550,9 +577,9 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch((err) => console.error('[studio] Upload error:', err));
   }
 
-  // ===================================================================
-  // 9) PER-REMOTE CHAT HELPER
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 10) PER-REMOTE CHAT APPENDER
+  // ────────────────────────────────────────────────────────────────────────
   function appendPerRemoteChatMessage(container, sender, text) {
     const div = document.createElement('div');
     div.textContent = `[${sender}]: ${text}`;
@@ -560,9 +587,9 @@ document.addEventListener('DOMContentLoaded', () => {
     container.scrollTop = container.scrollHeight;
   }
 
-  // ===================================================================
-  // 10) INITIALIZATION
-  // ===================================================================
+  // ────────────────────────────────────────────────────────────────────────
+  // 11) INITIALIZATION
+  // ────────────────────────────────────────────────────────────────────────
   (async () => {
     await initStudioMic();
     initWebSocket();
