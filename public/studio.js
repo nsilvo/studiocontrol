@@ -4,7 +4,7 @@
  * Front-end logic for the studio control interface (v3).
  * - Supports waiting/connections as before.
  * - Adds a “Kick” button for connected contributors.
- * - Handles new "kick-remote" messaging.
+ * - Ensures audioElement is created before ontrack uses it.
  */
 
 (() => {
@@ -263,7 +263,7 @@
     const kickBtn = document.createElement('button');
     kickBtn.textContent = 'Kick';
     kickBtn.className = 'kick-btn';
-    kickBtn.style.background = '#dc3545';     /* red background */
+    kickBtn.style.background = '#dc3545'; // red background
     kickBtn.style.marginLeft = '10px';
     kickBtn.onclick = () => {
       if (confirm(`Are you sure you want to kick ${remoteName}?`)) {
@@ -355,6 +355,10 @@
       // When remote track arrives
       pc.ontrack = (evt) => {
         const [remoteStream] = evt.streams;
+        // Ensure audioElement and UI created
+        if (!entry.audioElement) {
+          addConnectedUI(remoteID);
+        }
         entry.audioElement.srcObject = remoteStream;
         setupMeter(remoteID, remoteStream);
         entry.muteBtn.disabled = false;
@@ -530,12 +534,12 @@
     const div = document.createElement('div');
     div.className = 'chat-message';
     if (isStudio) {
-      div.innerHTML = `<strong>Studio:</strong> ${message}`;
-    } else {
-      div.innerHTML = `<strong>${senderName}:</strong> ${message}`;
-    }
-    chatWindowEl.appendChild(div);
-    chatWindowEl.scrollTop = chatWindowEl.scrollHeight;
+      div.innerHTML = `<strong>Studio:</strong> ${message}`;  
+    } else {  
+      div.innerHTML = `<strong>${senderName}:</strong> ${message}`;  
+    }  
+    chatWindowEl.appendChild(div);  
+    chatWindowEl.scrollTop = chatWindowEl.scrollHeight;  
   }
 
   sendChatBtn.onclick = () => {
@@ -548,9 +552,9 @@
       message: text,
       target: 'all',
     };
-    ws.send(JSON.stringify(msgObj));
-    appendChatMessage('Studio', text, true);
-    chatInputEl.value = '';
+    ws.send(JSON.stringify(msgObj));  
+    appendChatMessage('Studio', text, true);  
+    chatInputEl.value = '';  
   };
 
   /////////////////////////////////////////////////////
