@@ -7,7 +7,7 @@
   <title>Remote Contributor</title>
   <link rel="stylesheet" href="style.css" />
   <style>
-    /* Simple styling; extend/override in style.css as needed */
+    /* Minimal styling; override in style.css as needed */
     body {
       font-family: Arial, sans-serif;
       margin: 20px;
@@ -107,7 +107,6 @@
       font-weight: bold;
       color: #0066cc;
     }
-    /* Name display area */
     #display-name {
       font-weight: bold;
       margin-bottom: 10px;
@@ -115,7 +114,7 @@
   </style>
 </head>
 <body>
-  <!-- Step 1: Enter name -->
+  <!-- Step 1: Enter name only -->
   <div id="name-step">
     <h1>Welcome, Contributor</h1>
     <p>Please enter your name to continue:</p>
@@ -139,7 +138,7 @@
     </div>
 
     <div id="meter-container">
-      <canvas id="meter-canvas" width="300" height="50"></canvas>
+      <canvas id="meter-canvas" width="300" height="60"></canvas>
     </div>
 
     <div id="chat-container">
@@ -152,7 +151,7 @@
     <audio id="audio-studio" autoplay style="display: none;"></audio>
   </div>
 
-  <!-- Include the remote JavaScript -->
+  <!-- Include the updated remote.js -->
   <script src="remote.js"></script>
 </body>
 </html>
