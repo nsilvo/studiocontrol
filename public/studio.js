@@ -1,12 +1,10 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface (v2).
- * - Remotes now wait in "waiting" state until the studio clicks "Connect."
- * - Two lists: Waiting Contributors & Connected Contributors.
- * - On "Connect", server tells remote to send its offer.
- * - Studio answers offers when they arrive.
- * - Displays audio meters, mute/unmute, and chat.
+ * Front-end logic for the studio control interface (v3).
+ * - Supports waiting/connections as before.
+ * - Adds a “Kick” button for connected contributors.
+ * - Handles new "kick-remote" messaging.
  */
 
 (() => {
@@ -16,14 +14,28 @@
       {
         urls: ['turn:turn.nkpa.co.uk:3478'],
         username: 'webrtcuser',
-        credential: 'uS2h$2JW!hL3!E9yb1N1'
-      }
-    ]
+        credential: 'uS2h$2JW!hL3!E9yb1N1',
+      },
+    ],
   };
 
   // Globals
   let ws;
-  // peers: remoteID → { state, liWaiting, liConnected, pc, audioElement, meterCanvas, analyserL, analyserR, meterContext, statusSpan, muteBtn, connectBtn }
+  // peers: remoteID → {
+  //   state,
+  //   liWaiting,
+  //   liConnected,
+  //   pc,
+  //   audioElement,
+  //   meterCanvas,
+  //   analyserL,
+  //   analyserR,
+  //   meterContext,
+  //   statusSpan,
+  //   muteBtn,
+  //   connectBtn,
+  //   kickBtn
+  // }
   const peers = new Map();
 
   const waitingListEl = document.getElementById('waiting-list');
@@ -37,13 +49,12 @@
   /////////////////////////////////////////////////////
   function initWebSocket() {
     ws = new WebSocket(`wss://${window.location.host}`);
-
     ws.onopen = () => {
       console.log('WebSocket connected (studio).');
       ws.send(JSON.stringify({ type: 'join', role: 'studio', name: 'Studio' }));
     };
 
-    ws.onmessage = evt => {
+    ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
         handleSignalingMessage(msg);
@@ -57,7 +68,7 @@
       setTimeout(initWebSocket, 5000);
     };
 
-    ws.onerror = err => {
+    ws.onerror = (err) => {
       console.error('WebSocket error:', err);
       ws.close();
     };
@@ -136,7 +147,7 @@
     const statusSpan = document.createElement('span');
     statusSpan.className = 'status';
     statusSpan.id = `status-${remoteID}`;
-    statusSpan.textContent = (state === 'waiting') ? 'waiting...' : state;
+    statusSpan.textContent = state === 'waiting' ? 'waiting...' : state;
     liWait.appendChild(statusSpan);
 
     entry.statusSpan = statusSpan;
@@ -146,11 +157,13 @@
       const connectBtn = document.createElement('button');
       connectBtn.textContent = 'Connect';
       connectBtn.onclick = () => {
-        ws.send(JSON.stringify({
-          type: 'connect-remote',
-          from: 'studio',
-          target: remoteID
-        }));
+        ws.send(
+          JSON.stringify({
+            type: 'connect-remote',
+            from: 'studio',
+            target: remoteID,
+          })
+        );
         connectBtn.disabled = true;
         statusSpan.textContent = 'connecting...';
       };
@@ -160,8 +173,14 @@
       entry.liWaiting = liWait;
       entry.liConnected = null;
       entry.pc = null;
+      entry.audioElement = null;
+      entry.analyserL = null;
+      entry.analyserR = null;
+      entry.meterContext = null;
+      entry.muteBtn = null;
+      entry.kickBtn = null;
     } else if (state === 'connected') {
-      // If server says “connected” right away (unlikely), put in connected UI
+      // If server says “connected” right away (unlikely), move to connected UI
       addConnectedUI(remoteID, remoteName);
       entry.liWaiting = null;
       entry.liConnected = document.getElementById(`connected-${remoteID}`);
@@ -171,7 +190,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Update a remote’s state (waiting → connecting → connected)
+  // Update a remote’s state (waiting → connecting → offered → connected)
   /////////////////////////////////////////////////////
   function updateRemoteState(remoteID, newState) {
     const entry = peers.get(remoteID);
@@ -194,7 +213,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Create the Connected Contributors UI
+  // Create the Connected Contributors UI (with Mute & Kick)
   /////////////////////////////////////////////////////
   function addConnectedUI(remoteID) {
     const entry = peers.get(remoteID);
@@ -218,12 +237,13 @@
     statusSpan.id = `status-connected-${remoteID}`;
     statusSpan.textContent = 'connected';
     liConn.appendChild(statusSpan);
+    entry.statusSpan = statusSpan;
 
     // Mute/unmute button
     const muteBtn = document.createElement('button');
     muteBtn.textContent = 'Mute';
     muteBtn.className = 'mute-btn';
-    muteBtn.disabled = true; // will enable when track arrives
+    muteBtn.disabled = true; // will enable when audio track arrives
     muteBtn.onclick = () => {
       const peer = peers.get(remoteID);
       if (!peer) return;
@@ -237,16 +257,40 @@
       }
     };
     liConn.appendChild(muteBtn);
+    entry.muteBtn = muteBtn;
 
-    // Meter canvas
+    // Kick button
+    const kickBtn = document.createElement('button');
+    kickBtn.textContent = 'Kick';
+    kickBtn.className = 'kick-btn';
+    kickBtn.style.background = '#dc3545';     /* red background */
+    kickBtn.style.marginLeft = '10px';
+    kickBtn.onclick = () => {
+      if (confirm(`Are you sure you want to kick ${remoteName}?`)) {
+        ws.send(
+          JSON.stringify({
+            type: 'kick-remote',
+            from: 'studio',
+            target: remoteID,
+          })
+        );
+      }
+    };
+    liConn.appendChild(kickBtn);
+    entry.kickBtn = kickBtn;
+
+    // Meter canvas (stereo: green = left, blue = right)
     const meterCanvas = document.createElement('canvas');
     meterCanvas.width = 100;
     meterCanvas.height = 20;
     meterCanvas.className = 'meter-canvas';
     meterCanvas.id = `meter-${remoteID}`;
     liConn.appendChild(meterCanvas);
+    entry.meterCanvas = meterCanvas;
+    entry.meterContext = meterCanvas.getContext('2d');
 
     contributorListEl.appendChild(liConn);
+    entry.liConnected = liConn;
 
     // Hidden audio element to play remote audio
     const audioEl = document.createElement('audio');
@@ -255,12 +299,8 @@
     audioEl.controls = false;
     audioEl.muted = false;
     document.body.appendChild(audioEl);
-
-    entry.liConnected = liConn;
-    entry.muteBtn = muteBtn;
     entry.audioElement = audioEl;
-    entry.meterCanvas = meterCanvas;
-    entry.meterContext = meterCanvas.getContext('2d');
+
     entry.analyserL = null;
     entry.analyserR = null;
   }
@@ -313,7 +353,7 @@
       }
 
       // When remote track arrives
-      pc.ontrack = evt => {
+      pc.ontrack = (evt) => {
         const [remoteStream] = evt.streams;
         entry.audioElement.srcObject = remoteStream;
         setupMeter(remoteID, remoteStream);
@@ -321,14 +361,14 @@
       };
 
       // Send ICE candidates to remote
-      pc.onicecandidate = evt => {
+      pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
             JSON.stringify({
               type: 'candidate',
               from: 'studio',
               target: remoteID,
-              candidate: evt.candidate
+              candidate: evt.candidate,
             })
           );
         }
@@ -362,7 +402,7 @@
         type: 'answer',
         from: 'studio',
         target: remoteID,
-        sdp: entry.pc.localDescription.sdp
+        sdp: entry.pc.localDescription.sdp,
       })
     );
   }
@@ -443,7 +483,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Continuously draw audio meter (L=green, R=blue)
+  // Continuously draw audio meter (green = left, blue = right)
   /////////////////////////////////////////////////////
   function drawMeter(remoteID) {
     const entry = peers.get(remoteID);
@@ -506,7 +546,7 @@
       from: 'studio',
       name: 'Studio',
       message: text,
-      target: 'all'
+      target: 'all',
     };
     ws.send(JSON.stringify(msgObj));
     appendChatMessage('Studio', text, true);

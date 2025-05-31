@@ -1,10 +1,9 @@
 /**
  * remote.js
  *
- * Front-end logic for a remote contributor (v2).
- * - After joining, waits in “waiting” state until server sends “start-call.”
- * - Then performs WebRTC: getUserMedia, create offer, etc.
- * - Supports mute/self, send test tone, audio meter, chat.
+ * Front-end logic for a remote contributor (v3).
+ * - Handles “kicked” message from server, alerting the user and closing.
+ * - Everything else is same as before (waiting → start-call → WebRTC).
  */
 
 (() => {
@@ -14,9 +13,9 @@
       {
         urls: ['turn:turn.nkpa.co.uk:3478'],
         username: 'webrtcuser',
-        credential: 'uS2h$2JW!hL3!E9yb1N1'
-      }
-    ]
+        credential: 'uS2h$2JW!hL3!E9yb1N1',
+      },
+    ],
   };
 
   // Globals
@@ -60,13 +59,16 @@
       ws.send(JSON.stringify({ type: 'join', role: 'remote', name: displayName }));
     };
 
-    ws.onmessage = evt => {
+    ws.onmessage = (evt) => {
+      let msg;
       try {
-        const msg = JSON.parse(evt.data);
-        handleSignalingMessage(msg);
+        msg = JSON.parse(evt.data);
       } catch (err) {
         console.error('Invalid JSON from server:', err);
+        return;
       }
+
+      handleSignalingMessage(msg);
     };
 
     ws.onclose = () => {
@@ -79,7 +81,7 @@
       }
     };
 
-    ws.onerror = err => {
+    ws.onerror = (err) => {
       console.error('WebSocket error:', err);
       ws.close();
     };
@@ -118,6 +120,13 @@
         connStatusSpan.textContent = 'studio disconnected';
         break;
 
+      case 'kicked':
+        // { type: 'kicked', reason: '...' }
+        alert(`You have been disconnected by the studio:\n\n${msg.reason}`);
+        ws.close();
+        connStatusSpan.textContent = 'kicked';
+        break;
+
       case 'chat':
         // { type:'chat', from, name, message }
         appendChatMessage(msg.name, msg.message, msg.from === localID);
@@ -137,8 +146,8 @@
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 48000,
-          channelCount: 2
-        }
+          channelCount: 2,
+        },
       });
     } catch (err) {
       console.error('Failed to getUserMedia:', err);
@@ -157,14 +166,14 @@
     setupLocalMeter(localStream);
 
     // ICE candidates → send to studio
-    pc.onicecandidate = evt => {
+    pc.onicecandidate = (evt) => {
       if (evt.candidate) {
         ws.send(
           JSON.stringify({
             type: 'candidate',
             from: localID,
             target: 'studio',
-            candidate: evt.candidate
+            candidate: evt.candidate,
           })
         );
       }
@@ -192,7 +201,7 @@
       JSON.stringify({
         type: 'offer',
         from: localID,
-        sdp: pc.localDescription.sdp
+        sdp: pc.localDescription.sdp,
       })
     );
   }
@@ -362,7 +371,7 @@
       from: localID,
       name: displayName,
       message: text,
-      target: 'studio'
+      target: 'studio',
     };
     ws.send(JSON.stringify(msgObj));
     appendChatMessage('You', text, true);
