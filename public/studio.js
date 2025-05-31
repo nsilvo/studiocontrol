@@ -1,11 +1,11 @@
 /**
- * studio.js (v11)
+ * studio.js (v11.1)
  *
  * - Core WebRTC signaling and UI for studio control:
  *    • PPM meters for studio mic and each remote (with numeric scale)
  *    • Bitrate & jitter graphs per remote (updated via getStats)
- *    • Multi-track recording: records studio mic + each remote as separate tracks, live waveforms, timer, downloads
- *    • Caller-to-caller routing: mix (Studio + Caller A) → Caller B, with renegotiation
+ *    • Multi‐track recording: records studio mic + each remote as separate tracks, live waveforms, timer, downloads
+ *    • Caller‐to‐caller routing: mix (Studio + Caller A) → Caller B, with renegotiation
  *    • Chat window, mute/unmute per remote, kick buttons
  *    • Sports support:
  *        - Receives "score-update" → displays alert or scoreboard
@@ -78,7 +78,7 @@
   let recordingStartTime = 0;
   let recordTimerInterval = null;
   const mediaRecorders = []; // array of MediaRecorder
-  const recordedBlobs = {};   // { trackID: Blob[] }
+  let recordedBlobs = {};    // <=== Changed from const to let
 
   /////////////////////////////////////////////////////
   // INITIALIZATION
@@ -159,17 +159,14 @@
         break;
 
       case 'score-update':
-        // { teamA, teamB, scoreA, scoreB }
         displayScoreboardUpdate(msg.teamA, msg.teamB, msg.scoreA, msg.scoreB);
         break;
 
       case 'goal':
-        // msg: { from }
         highlightGoal(msg.from);
         break;
 
       case 'reporter-recording':
-        // msg: { from, name, data }
         displayReporterSegment(msg.from, msg.name, msg.data);
         break;
 
@@ -404,7 +401,7 @@
     liConn.appendChild(bitrateSelector);
     entry.bitrateSelector = bitrateSelector;
 
-    // Caller-to-Caller routing dropdown
+    // Caller‐to‐Caller routing dropdown
     const routeLabel = document.createElement('label');
     routeLabel.textContent = 'Route to:';
     liConn.appendChild(routeLabel);
@@ -416,7 +413,6 @@
     defaultOpt.value = '';
     defaultOpt.textContent = '—';
     routeSelector.appendChild(defaultOpt);
-    // Options will be filled once at least 2 remotes are connected
     routeSelector.onchange = () => {
       const targetID = routeSelector.value;
       if (targetID && peers.has(targetID)) {
@@ -530,23 +526,27 @@
     contributorListEl.appendChild(liConn);
     entry.liConnected = liConn;
 
-    // Hidden <audio> for remote → studio
-    const audioRemote = document.createElement('audio');
-    audioRemote.id = `audio-remote-${remoteID}`;
-    audioRemote.autoplay = true;
-    audioRemote.controls = false;
-    audioRemote.muted = false;
-    document.body.appendChild(audioRemote);
-    entry.audioElementRemoteToStudio = audioRemote;
+    // Ensure audio element exists before ontrack
+    if (!entry.audioElementRemoteToStudio) {
+      const audioRemote = document.createElement('audio');
+      audioRemote.id = `audio-remote-${remoteID}`;
+      audioRemote.autoplay = true;
+      audioRemote.controls = false;
+      audioRemote.muted = false;
+      document.body.appendChild(audioRemote);
+      entry.audioElementRemoteToStudio = audioRemote;
+    }
 
-    // Hidden <audio> for studio → remote
-    const audioStudio = document.createElement('audio');
-    audioStudio.id = `audio-studio-${remoteID}`;
-    audioStudio.autoplay = true;
-    audioStudio.controls = false;
-    audioStudio.muted = false;
-    document.body.appendChild(audioStudio);
-    entry.audioElementStudioToRemote = audioStudio;
+    // Ensure studio→remote audio element exists
+    if (!entry.audioElementStudioToRemote) {
+      const audioStudio = document.createElement('audio');
+      audioStudio.id = `audio-studio-${remoteID}`;
+      audioStudio.autoplay = true;
+      audioStudio.controls = false;
+      audioStudio.muted = false;
+      document.body.appendChild(audioStudio);
+      entry.audioElementStudioToRemote = audioStudio;
+    }
 
     entry.analyserL = null;
     entry.analyserR = null;
@@ -627,10 +627,22 @@
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
       }
 
-      // ontrack: attach incoming remote→studio and possible routing track
+      // ontrack: attach incoming remote→studio and possible additional tracks
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
-        // First audio track = remote→studio
+
+        // Ensure audioElementRemoteToStudio exists
+        if (!entry.audioElementRemoteToStudio) {
+          const audioRemote = document.createElement('audio');
+          audioRemote.id = `audio-remote-${remoteID}`;
+          audioRemote.autoplay = true;
+          audioRemote.controls = false;
+          audioRemote.muted = false;
+          document.body.appendChild(audioRemote);
+          entry.audioElementRemoteToStudio = audioRemote;
+        }
+
+        // First track: remote→studio
         if (!entry.audioElementRemoteToStudio.srcObject) {
           entry.audioElementRemoteToStudio.srcObject = incomingStream;
           setupRemotePPM(remoteID, incomingStream);
@@ -643,12 +655,21 @@
           src.connect(analyser);
           entry.recordAnalyser = analyser;
         }
-        // If another audio track arrives (e.g. Studio→Remote echo or routed mix)
-        else if (
-          !entry.audioElementStudioToRemote.srcObject &&
-          evt.track.kind === 'audio'
-        ) {
-          entry.audioElementStudioToRemote.srcObject = incomingStream;
+        // If second audio track arrives (e.g. studio→remote echo or routed mix):
+        else {
+          // Ensure audioElementStudioToRemote exists
+          if (!entry.audioElementStudioToRemote) {
+            const audioStudio = document.createElement('audio');
+            audioStudio.id = `audio-studio-${remoteID}`;
+            audioStudio.autoplay = true;
+            audioStudio.controls = false;
+            audioStudio.muted = false;
+            document.body.appendChild(audioStudio);
+            entry.audioElementStudioToRemote = audioStudio;
+          }
+          if (!entry.audioElementStudioToRemote.srcObject && evt.track.kind === 'audio') {
+            entry.audioElementStudioToRemote.srcObject = incomingStream;
+          }
         }
       };
 
@@ -691,9 +712,9 @@
     // Drain queued ICE candidates
     if (entry.pendingCandidates.length > 0) {
       entry.pendingCandidates.forEach((c) => {
-        entry.pc.addIceCandidate(new RTCIceCandidate(c)).catch((e) => {
-          console.error('Error adding queued ICE candidate:', e);
-        });
+        entry.pc
+          .addIceCandidate(new RTCIceCandidate(c))
+          .catch((e) => console.error('Error adding queued ICE candidate:', e));
       });
       entry.pendingCandidates = [];
     }
@@ -708,7 +729,7 @@
       return;
     }
 
-    // Send answer back to remote
+    // Send answer
     ws.send(
       JSON.stringify({
         type: 'answer',
@@ -731,9 +752,7 @@
     }
     entry.pc
       .addIceCandidate(new RTCIceCandidate(candidate))
-      .catch((err) => {
-        console.error(`Error adding ICE candidate for ${from}:`, err);
-      });
+      .catch((err) => console.error(`Error adding ICE candidate for ${from}:`, err));
   }
 
   /////////////////////////////////////////////////////
@@ -952,38 +971,59 @@
         );
       }
 
-      // Parse Opus info
+      // Parse Opus codec info
       const codecInfo = parseOpusInfo(sdp);
       if (codecInfo) {
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
       }
 
-      // ontrack: handle incoming remote audio & possible additional tracks
+      // ontrack: handle incoming audio
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
-        // First track: remote→studio
+
+        // Ensure audioElementRemoteToStudio exists
+        if (!entry.audioElementRemoteToStudio) {
+          const audioRemote = document.createElement('audio');
+          audioRemote.id = `audio-remote-${remoteID}`;
+          audioRemote.autoplay = true;
+          audioRemote.controls = false;
+          audioRemote.muted = false;
+          document.body.appendChild(audioRemote);
+          entry.audioElementRemoteToStudio = audioRemote;
+        }
+
+        // First audio track: remote→studio
         if (!entry.audioElementRemoteToStudio.srcObject) {
           entry.audioElementRemoteToStudio.srcObject = incomingStream;
           setupRemotePPM(remoteID, incomingStream);
 
           // Recording waveform analyser
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const src = audioCtx.createMediaStreamSource(incomingStream);
+          const srcNode = audioCtx.createMediaStreamSource(incomingStream);
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 2048;
-          src.connect(analyser);
+          srcNode.connect(analyser);
           entry.recordAnalyser = analyser;
         }
-        // Second track: studio→remote echo or routed mix
-        else if (
-          !entry.audioElementStudioToRemote.srcObject &&
-          evt.track.kind === 'audio'
-        ) {
-          entry.audioElementStudioToRemote.srcObject = incomingStream;
+        // Second audio track: studio→remote echo or routed mix
+        else {
+          // Ensure audioElementStudioToRemote exists
+          if (!entry.audioElementStudioToRemote) {
+            const audioStudio = document.createElement('audio');
+            audioStudio.id = `audio-studio-${remoteID}`;
+            audioStudio.autoplay = true;
+            audioStudio.controls = false;
+            audioStudio.muted = false;
+            document.body.appendChild(audioStudio);
+            entry.audioElementStudioToRemote = audioStudio;
+          }
+          if (!entry.audioElementStudioToRemote.srcObject && evt.track.kind === 'audio') {
+            entry.audioElementStudioToRemote.srcObject = incomingStream;
+          }
         }
       };
 
-      // ICE candidate broadcast
+      // ICE candidates
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
@@ -997,7 +1037,7 @@
         }
       };
 
-      // Connection state updates → stats
+      // Connection state change
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
         entry.statusSpan.textContent = state;
@@ -1011,9 +1051,11 @@
 
     // Set remote description
     try {
-      await entry.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      await entry.pc.setRemoteDescription(
+        new RTCSessionDescription({ type: 'offer', sdp })
+      );
     } catch (err) {
-      console.error(`Failed to set remote desc for ${remoteID}:`, err);
+      console.error(`Failed to set remote description for ${remoteID}:`, err);
       return;
     }
 
@@ -1037,7 +1079,6 @@
       return;
     }
 
-    // Send answer
     ws.send(
       JSON.stringify({
         type: 'answer',
@@ -1228,7 +1269,7 @@
     bCtx.beginPath();
     data.forEach((val, i) => {
       const x = (i / 59) * width;
-      const y = height - Math.min((val / 200) * height, height);
+      const y = height - Math.min((val / 200) * height, height); // scale max 200 kbps
       i === 0 ? bCtx.moveTo(x, y) : bCtx.lineTo(x, y);
     });
     bCtx.stroke();
@@ -1243,333 +1284,7 @@
     jCtx.beginPath();
     jData.forEach((val, i) => {
       const x = (i / 59) * width;
-      const y = height - Math.min((val / 100) * height, height);
-      i === 0 ? jCtx.moveTo(x, y) : jCtx.lineTo(x, y);
-    });
-    jCtx.stroke();
-  }
-
-  /////////////////////////////////////////////////////
-  // HANDLE OFFER FROM REMOTE
-  /////////////////////////////////////////////////////
-  async function handleOffer(remoteID, sdp) {
-    const entry = peers.get(remoteID);
-    if (!entry) {
-      console.error('Received offer for unknown remote:', remoteID);
-      return;
-    }
-
-    // Ensure we have studioAudioTrack
-    if (!studioAudioTrack && studioAudioStream) {
-      studioAudioTrack = studioAudioStream.getAudioTracks()[0];
-    }
-
-    // Create PC if absent
-    if (!entry.pc) {
-      const pc = new RTCPeerConnection(ICE_CONFIG);
-      entry.pc = pc;
-
-      // Add Studio → Remote track
-      if (studioAudioTrack) {
-        pc.addTrack(
-          studioAudioTrack,
-          studioAudioStream || new MediaStream([studioAudioTrack])
-        );
-      }
-
-      // Parse Opus codec info
-      const codecInfo = parseOpusInfo(sdp);
-      if (codecInfo) {
-        entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
-      }
-
-      // ontrack: handle incoming audio
-      pc.ontrack = (evt) => {
-        const [incomingStream] = evt.streams;
-        // First audio track: remote→studio
-        if (!entry.audioElementRemoteToStudio.srcObject) {
-          entry.audioElementRemoteToStudio.srcObject = incomingStream;
-          setupRemotePPM(remoteID, incomingStream);
-
-          // Recording waveform analyser
-          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const srcNode = audioCtx.createMediaStreamSource(incomingStream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 2048;
-          srcNode.connect(analyser);
-          entry.recordAnalyser = analyser;
-        }
-        // Second audio track: studio→remote echo or routed mix
-        else if (
-          !entry.audioElementStudioToRemote.srcObject &&
-          evt.track.kind === 'audio'
-        ) {
-          entry.audioElementStudioToRemote.srcObject = incomingStream;
-        }
-      };
-
-      // ICE candidates
-      pc.onicecandidate = (evt) => {
-        if (evt.candidate) {
-          ws.send(
-            JSON.stringify({
-              type: 'candidate',
-              from: 'studio',
-              target: remoteID,
-              candidate: evt.candidate,
-            })
-          );
-        }
-      };
-
-      // Connection state change
-      pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        entry.statusSpan.textContent = state;
-        if (state === 'connected') startStats(remoteID);
-        if (['disconnected', 'failed', 'closed'].includes(state) && entry.statsInterval) {
-          clearInterval(entry.statsInterval);
-          entry.statsInterval = null;
-        }
-      };
-    }
-
-    // Set remote description
-    try {
-      await entry.pc.setRemoteDescription(
-        new RTCSessionDescription({ type: 'offer', sdp })
-      );
-    } catch (err) {
-      console.error(`Failed to set remote description for ${remoteID}:`, err);
-      return;
-    }
-
-    // River queued ICE candidates
-    if (entry.pendingCandidates.length > 0) {
-      entry.pendingCandidates.forEach((c) => {
-        entry.pc
-          .addIceCandidate(new RTCIceCandidate(c))
-          .catch((e) => console.error('Error adding queued ICE candidate:', e));
-      });
-      entry.pendingCandidates = [];
-    }
-
-    // Create answer
-    let answer;
-    try {
-      answer = await entry.pc.createAnswer();
-      await entry.pc.setLocalDescription(answer);
-    } catch (err) {
-      console.error(`Failed to create/set answer for ${remoteID}:`, err);
-      return;
-    }
-
-    ws.send(
-      JSON.stringify({
-        type: 'answer',
-        from: 'studio',
-        target: remoteID,
-        sdp: entry.pc.localDescription.sdp,
-      })
-    );
-  }
-
-  /////////////////////////////////////////////////////
-  // HANDLE ICE CANDIDATE FROM REMOTE
-  /////////////////////////////////////////////////////
-  function handleCandidate(from, candidate) {
-    const entry = peers.get(from);
-    if (!entry) return;
-    if (!entry.pc || !entry.pc.remoteDescription) {
-      entry.pendingCandidates.push(candidate);
-      return;
-    }
-    entry.pc
-      .addIceCandidate(new RTCIceCandidate(candidate))
-      .catch((err) => console.error(`Error adding ICE candidate for ${from}:`, err));
-  }
-
-  /////////////////////////////////////////////////////
-  // HANDLE MUTE UPDATE FROM REMOTE
-  /////////////////////////////////////////////////////
-  function handleMuteUpdate(from, muted) {
-    if (peers.has(from)) {
-      const entry = peers.get(from);
-      entry.remoteMuted = muted;
-      if (muted) {
-        entry.muteBtn.textContent = 'Remote Muted';
-        entry.muteBtn.disabled = true;
-      } else {
-        entry.muteBtn.textContent = entry.localMuted ? 'Unmute Remote' : 'Mute Remote';
-        entry.muteBtn.disabled = false;
-      }
-    }
-  }
-
-  /////////////////////////////////////////////////////
-  // PARSE OPUS INFO
-  /////////////////////////////////////////////////////
-  function parseOpusInfo(sdp) {
-    const lines = sdp.split('\n');
-    let opusPayloadType = null;
-    const fmtMap = new Map();
-    let sampling = null,
-      channels = null;
-
-    for (const line of lines) {
-      if (line.startsWith('a=rtpmap:') && line.includes('opus/48000')) {
-        const parts = line.trim().split(' ');
-        const payload = parts[0].split(':')[1];
-        const params = parts[1].split('/');
-        if (params[0] === 'opus') {
-          opusPayloadType = payload;
-          sampling = params[1];
-          channels = params[2];
-          fmtMap.set(payload, `Opus ${sampling}Hz/${channels}ch`);
-        }
-      }
-    }
-    return opusPayloadType && fmtMap.has(opusPayloadType) ? fmtMap.get(opusPayloadType) : null;
-  }
-
-  /////////////////////////////////////////////////////
-  // SETUP REMOTE PPM & RECORD WAVEFORM
-  /////////////////////////////////////////////////////
-  function setupRemotePPM(remoteID, stream) {
-    const entry = peers.get(remoteID);
-    if (!entry) return;
-
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const srcNode = audioCtx.createMediaStreamSource(stream);
-
-    const splitter = audioCtx.createChannelSplitter(2);
-    srcNode.connect(splitter);
-
-    const analyserL = audioCtx.createAnalyser();
-    analyserL.fftSize = 1024;
-    const analyserR = audioCtx.createAnalyser();
-    analyserR.fftSize = 1024;
-
-    splitter.connect(analyserL, 0);
-    splitter.connect(analyserR, 1);
-
-    entry.analyserL = analyserL;
-    entry.analyserR = analyserR;
-    entry.ppmPeak = 0;
-
-    drawRemotePPM(remoteID);
-  }
-
-  function drawRemotePPM(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry || !entry.analyserL || !entry.analyserR) return;
-
-    const canvas = entry.metreCanvas;
-    const ctx = entry.metreContext;
-    const width = canvas.width;
-    const height = canvas.height;
-
-    // Numeric scale (0.00 to 1.00)
-    ctx.fillStyle = '#fff';
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'center';
-    for (let i = 0; i <= 4; i++) {
-      const x = (i / 4) * width;
-      ctx.fillRect(x, height - 10, 1, 10);
-      const label = (i / 4).toFixed(2);
-      ctx.fillText(label, x, height - 12);
-    }
-
-    const bufferLength = entry.analyserL.fftSize;
-    const dataL = new Float32Array(bufferLength);
-    const dataR = new Float32Array(bufferLength);
-    entry.analyserL.getFloatTimeDomainData(dataL);
-    entry.analyserR.getFloatTimeDomainData(dataR);
-
-    let maxAmp = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const aL = Math.abs(dataL[i]);
-      const aR = Math.abs(dataR[i]);
-      if (aL > maxAmp) maxAmp = aL;
-      if (aR > maxAmp) maxAmp = aR;
-    }
-
-    entry.ppmPeak = maxAmp > entry.ppmPeak ? maxAmp : Math.max(entry.ppmPeak - 0.005, 0);
-
-    const levelWidth = maxAmp * width;
-    ctx.fillStyle = '#4caf50';
-    ctx.fillRect(0, 0, levelWidth, height - 12);
-
-    const peakX = entry.ppmPeak * width;
-    ctx.fillStyle = '#f44336';
-    ctx.fillRect(peakX - 1, 0, 2, height - 12);
-
-    requestAnimationFrame(() => drawRemotePPM(remoteID));
-  }
-
-  /////////////////////////////////////////////////////
-  // START STATS (Bitrate & Jitter)
-  /////////////////////////////////////////////////////
-  function startStats(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry || !entry.pc) return;
-    entry.stats = { lastBytes: 0, lastTimestamp: 0, bitrateData: [], jitterData: [] };
-    entry.statsInterval = setInterval(async () => {
-      const stats = await entry.pc.getStats();
-      stats.forEach((report) => {
-        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
-          const now = report.timestamp;
-          const bytes = report.bytesReceived;
-          if (entry.stats.lastTimestamp) {
-            const deltaBytes = bytes - entry.stats.lastBytes;
-            const deltaTime = (now - entry.stats.lastTimestamp) / 1000; // ms→s
-            const bitrate = (deltaBytes * 8) / deltaTime; // bps
-            entry.stats.bitrateData.push(bitrate / 1000); // kbps
-            if (entry.stats.bitrateData.length > 60) entry.stats.bitrateData.shift();
-          }
-          entry.stats.lastBytes = bytes;
-          entry.stats.lastTimestamp = now;
-          const jitter = report.jitter * 1000; // seconds→ms
-          entry.stats.jitterData.push(jitter);
-          if (entry.stats.jitterData.length > 60) entry.stats.jitterData.shift();
-        }
-      });
-      drawStatsGraphs(remoteID);
-    }, 1000);
-  }
-
-  function drawStatsGraphs(remoteID) {
-    const entry = peers.get(remoteID);
-    if (!entry) return;
-
-    // Bitrate
-    const bCtx = entry.bitrateContext;
-    const bCanvas = entry.bitrateCanvas;
-    const width = bCanvas.width;
-    const height = bCanvas.height;
-    const data = entry.stats.bitrateData;
-
-    bCtx.clearRect(0, 0, width, height);
-    bCtx.strokeStyle = '#4caf50';
-    bCtx.beginPath();
-    data.forEach((val, i) => {
-      const x = (i / 59) * width;
-      const y = height - Math.min((val / 200) * height, height);
-      i === 0 ? bCtx.moveTo(x, y) : bCtx.lineTo(x, y);
-    });
-    bCtx.stroke();
-
-    // Jitter
-    const jCtx = entry.jitterContext;
-    const jCanvas = entry.jitterCanvas;
-    const jData = entry.stats.jitterData;
-
-    jCtx.clearRect(0, 0, width, height);
-    jCtx.strokeStyle = '#2196f3';
-    jCtx.beginPath();
-    jData.forEach((val, i) => {
-      const x = (i / 59) * width;
-      const y = height - Math.min((val / 100) * height, height);
+      const y = height - Math.min((val / 100) * height, height); // scale max 100 ms
       i === 0 ? jCtx.moveTo(x, y) : jCtx.lineTo(x, y);
     });
     jCtx.stroke();
@@ -1593,7 +1308,9 @@
       studioSource.connect(destNode);
     }
     // Source remote
-    const remoteStream = srcEntry.audioElementRemoteToStudio.srcObject;
+    const remoteStream = srcEntry.audioElementRemoteToStudio
+      ? srcEntry.audioElementRemoteToStudio.srcObject
+      : null;
     if (remoteStream) {
       const remoteSource = audioCtx.createMediaStreamSource(remoteStream);
       remoteSource.connect(destNode);
@@ -1669,7 +1386,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // MULTI-TRACK RECORDING
+  // MULTI‐TRACK RECORDING
   /////////////////////////////////////////////////////
   function startRecording() {
     if (recording) return;
@@ -1678,7 +1395,7 @@
     stopRecBtn.disabled = false;
 
     waveformsContainer.innerHTML = '';
-    recordedBlobs = {};
+    recordedBlobs = {}; // <=== Clear recordedBlobs rather than reassigning a const
 
     recordingStartTime = Date.now();
     recordTimerEl.textContent = '00:00:00';
@@ -1691,7 +1408,9 @@
 
     // Each remote’s track
     peers.forEach((entry, remoteID) => {
-      const remoteStream = entry.audioElementRemoteToStudio.srcObject;
+      const remoteStream = entry.audioElementRemoteToStudio
+        ? entry.audioElementRemoteToStudio.srcObject
+        : null;
       if (remoteStream) {
         setupTrackRecording(remoteID, remoteStream);
       }
@@ -1873,7 +1592,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Initialization on page load
+  // DOCUMENT READY
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
     init();
