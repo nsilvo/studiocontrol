@@ -3,13 +3,12 @@
  *
  * - Captures studio mic → drives #studioVuCanvas vertical VU meter.
  * - For each remote:
- *     • Creates a compact 250×150 card (with a vertical VU meter, Mute/Unmute, Toggle Stats).
- *     • Able to call, mute/unmute, mode‐select, bitrate input, per‐remote chat.
- *     • Hidden bitrate/jitter graphs that show when “Toggle Stats” clicked.
- * - All remote cards live under #remotesContainer at top of page.
+ *     • Creates a compact 250×150 card (with a vertical VU meter, Call, Mute/Unmute, Mode, Bitrate, Toggle Stats).
+ *     • Hides per‐remote chat entirely.
+ * - All remote cards appear in #remotesContainer (a flex‐wrapped row).
  * - “VU Meters” row at top shows #studioVuCanvas + one .remoteVuCanvas per remote.
- * - Multi‐track recording (unchanged).
- * - Global chat (unchanged).
+ * - Single global chat → broadcast to all remotes.
+ * - Recording controls at bottom (unchanged).
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -28,7 +27,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const WS_URL = `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.host}`;
   let ws = null;
 
-  // peers: Map<remoteId, { pc, entryEl, audioContext, analyserRec, rafIdRec, mediaStream, muted }>
+  // peers: Map<remoteId, { pc, entryEl, analyserRec, rafIdRec, mediaStream, muted }>
   const peers = new Map();
   // mediaStreams: Map<remoteId, MediaStream>
   const mediaStreams = new Map();
@@ -80,19 +79,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear canvas
     studioVuCtx.clearRect(0, 0, vuWidth, vuHeight);
 
-    // Draw vertical segmented meter
+    // Draw vertical segmented meter (10 segments)
     const segments = 10;
     const segHeight = vuHeight / segments;
     for (let i = 0; i < segments; i++) {
       const threshold = (i + 1) / segments; // 0.1, 0.2, ..., 1.0
-      let color = varColor(threshold);
       const y = vuHeight - (i + 1) * segHeight;
       if (rms >= threshold) {
-        studioVuCtx.fillStyle = color;
+        studioVuCtx.fillStyle = varColor(threshold);
         studioVuCtx.fillRect(0, y, vuWidth, segHeight - 2);
       } else {
-        // draw background segment border
-        studioVuCtx.strokeStyle = '#333';
+        studioVuCtx.strokeStyle = var(--border-color);
         studioVuCtx.strokeRect(0, y, vuWidth, segHeight - 2);
       }
     }
@@ -100,7 +97,7 @@ document.addEventListener('DOMContentLoaded', () => {
     studioRafId = requestAnimationFrame(drawStudioVuMeter);
   }
 
-  // Utility: pick green/yellow/red based on level
+  // Utility: pick green / yellow / red based on level
   function varColor(level) {
     if (level < 0.6) return getComputedStyle(document.documentElement).getPropertyValue('--meter-green');
     if (level < 0.8) return getComputedStyle(document.documentElement).getPropertyValue('--meter-yellow');
@@ -124,6 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
   chatSendBtnAll.onclick = () => {
     const text = chatInputAll.value.trim();
     if (!text) return;
+    // Send to server; server will broadcast to all remotes
     ws.send(
       JSON.stringify({
         type: 'chat',
@@ -171,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       peers.clear();
       mediaStreams.clear();
-      // Remove remote VU meters
+      // Remove per‐remote VU meter cards
       const vuContainer = document.getElementById('vuMetersContainer');
       vuContainer.querySelectorAll('.remote-meter-card').forEach((el) => el.remove());
     };
@@ -251,9 +249,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const ppmCanvas = entryEl.querySelector('.remote-meter canvas');
     const jitterCanvas = entryEl.querySelector('.jitter-graph canvas');
     const bitrateCanvas = entryEl.querySelector('.bitrate-graph canvas');
-    const chatWindow = entryEl.querySelector('.chat-window');
-    const chatInput = entryEl.querySelector('.chat-input');
-    const chatSendBtn = entryEl.querySelector('.chat-send-btn');
 
     document.getElementById('remotesContainer').appendChild(entryEl);
 
@@ -266,15 +261,12 @@ document.addEventListener('DOMContentLoaded', () => {
       studioMicStream.getAudioTracks().forEach((t) => pc.addTrack(t, studioMicStream));
     }
 
-    // 5e) ontrack: remote’s audio → play & meter
-    const audioEl = new Audio();
-    audioEl.autoplay = true;
+    // 5e) ontrack: remote’s audio → drive remote VU meter
     pc.ontrack = (evt) => {
       const [remoteStream] = evt.streams;
       entryEl.querySelector('.remote-status').textContent = '(connected)';
-      audioEl.srcObject = remoteStream;
 
-      // Start per‐remote VU metering
+      // Start per‐remote VU metering once
       if (!peers.get(remoteId).analyserRec) {
         const meterAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         const meterSrc = meterAudioCtx.createMediaStreamSource(remoteStream);
@@ -400,7 +392,7 @@ document.addEventListener('DOMContentLoaded', () => {
       );
     };
 
-    // Toggle Stats (show/hide PPM, Jitter, Bitrate graphs)
+    // Toggle Stats (show/hide PPM, Jitter, Bitrate)
     toggleStatsBtn.onclick = () => {
       const ppmDiv = entryEl.querySelector('.remote-meter');
       const jitDiv = entryEl.querySelector('.jitter-graph');
@@ -412,24 +404,6 @@ document.addEventListener('DOMContentLoaded', () => {
           div.style.display = 'none';
         }
       });
-    };
-
-    // Per-remote chat
-    chatSendBtn.onclick = () => {
-      const text = chatInput.value.trim();
-      if (!text) return;
-      ws.send(
-        JSON.stringify({
-          type: 'chat',
-          fromRole: 'studio',
-          fromId: window.STUDIO_ID || 'Studio',
-          target: 'remote',
-          targetId: remoteId,
-          text,
-        })
-      );
-      appendPerRemoteChatMessage(chatWindow, 'You', text);
-      chatInput.value = '';
     };
   }
 
@@ -578,17 +552,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // 10) PER-REMOTE CHAT APPENDER
-  // ────────────────────────────────────────────────────────────────────────
-  function appendPerRemoteChatMessage(container, sender, text) {
-    const div = document.createElement('div');
-    div.textContent = `[${sender}]: ${text}`;
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // 11) INITIALIZATION
+  // 10) INITIALIZATION
   // ────────────────────────────────────────────────────────────────────────
   (async () => {
     await initStudioMic();

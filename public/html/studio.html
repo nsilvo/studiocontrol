@@ -7,7 +7,7 @@
 </head>
 <body>
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- WebSocket Status Card (must have id="connStatus")            -->
+  <!-- 1) WebSocket Status (must have id="connStatus")               -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <div class="card" style="max-width: 900px; margin: 20px auto;">
     <h1>Studio Control</h1>
@@ -18,10 +18,10 @@
   </div>
 
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- 1) VU Meters for Studio Mic + Per‐Remote                      -->
+  <!-- 2) VU Meters for Studio Mic + Per‐Remote                      -->
   <!-- ────────────────────────────────────────────────────────────── -->
-  <div id="vuMetersContainer" style="max-width: 1000px; margin: 20px auto;">
-    <!-- Studio Mic VU Meter -->
+  <div id="vuMetersContainer" style="max-width: 1000px; margin: 0 auto;">
+    <!-- 2a) Studio Mic VU Meter -->
     <div class="vu-meter-vertical card" id="studioMeterCard">
       <div class="section-title">Studio Mic</div>
       <canvas id="studioVuCanvas" width="20" height="150"></canvas>
@@ -34,16 +34,16 @@
         <div>0</div>
       </div>
     </div>
-    <!-- Per‐Remote VU meter cards will be injected here via JS -->
+    <!-- 2b) Per‐Remote VU meter cards will be injected here by JS -->
   </div>
 
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- 2) Connected Remotes appear here (top of page)               -->
+  <!-- 3) Connected Remotes (250×150 cards)                         -->
   <!-- ────────────────────────────────────────────────────────────── -->
-  <div id="remotesContainer" style="max-width: 1000px; margin: 20px auto;"></div>
+  <div id="remotesContainer"></div>
 
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- 3) Global Chat                                               -->
+  <!-- 4) Global Studio Chat                                         -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <div id="chatContainer" class="card">
     <h2>Studio Chat</h2>
@@ -55,7 +55,7 @@
   </div>
 
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- 4) Recording Controls                                        -->
+  <!-- 5) Recording Controls                                         -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <div id="recordControls" class="card">
     <h2>Recording Controls</h2>
@@ -66,10 +66,11 @@
   </div>
 
   <!-- ────────────────────────────────────────────────────────────── -->
-  <!-- 5) Template for a single remote entry (250×150)             -->
+  <!-- 6) Template for a single remote entry (250×150)             -->
   <!-- ────────────────────────────────────────────────────────────── -->
   <template id="remoteEntryTemplate">
     <div class="remote-entry">
+      <!-- Header: Name, Status, Call/Mute -->
       <div class="remote-header">
         <div class="flex-row align-center gap-10">
           <span class="remote-name">Remote Name</span>
@@ -81,7 +82,7 @@
         </div>
       </div>
 
-      <!-- Vertical VU Meter for this remote -->
+      <!-- Middle: Vertical VU Meter + small controls -->
       <div class="flex-row align-center mt-6">
         <div class="vu-meter-vertical" style="margin-right:8px;">
           <canvas class="remoteVuCanvas" width="20" height="150"></canvas>
@@ -94,8 +95,6 @@
             <div>0</div>
           </div>
         </div>
-
-        <!-- Small control block -->
         <div class="flex-col gap-4">
           <div class="remote-controls flex-row gap-4">
             <label>Mode:</label>
@@ -112,7 +111,7 @@
         </div>
       </div>
 
-      <!-- Hidden by default; shown by “Toggle Stats” -->
+      <!-- Bottom: Hidden Stats (show/hide via Toggle Stats) -->
       <div class="flex-row justify-between mt-6">
         <div class="remote-meter" style="display:none;">
           <canvas width="70" height="30"></canvas>
@@ -125,15 +124,6 @@
         <div class="bitrate-graph" style="display:none;">
           <canvas width="70" height="30"></canvas>
           <div class="graph-label">Bitrate</div>
-        </div>
-      </div>
-
-      <!-- Per‐remote chat (small area) -->
-      <div class="chat-section mt-6">
-        <div class="chat-window"></div>
-        <div class="flex-row mt-4">
-          <input type="text" class="chat-input" placeholder="Type..." />
-          <button class="chat-send-btn btn">Send</button>
         </div>
       </div>
     </div>
