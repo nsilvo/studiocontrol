@@ -283,6 +283,19 @@ document.addEventListener('DOMContentLoaded', () => {
         appendGlobalChatMessage(sender, msg.text);
         break;
       }
+      case 'mute-update': {
+        // msg.from = remoteId, msg.muted = boolean
+        const remoteId = msg.from;
+        const muted = msg.muted;
+        const peerData = peers.get(remoteId);
+        if (peerData) {
+          const { entryEl } = peerData;
+          const muteBtn = entryEl.querySelector('.muteRemoteBtn');
+          muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+          entryEl.querySelector('.remote-status').textContent = muted ? '(self-muted)' : '(connected)';
+        }
+        break;
+      }
       default:
         console.warn('[studio] Unknown message:', msg.type);
     }
@@ -318,7 +331,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const callBtn = entryEl.querySelector('.callRemoteBtn');
     const muteBtn = entryEl.querySelector('.muteRemoteBtn');
     const modeSelect = entryEl.querySelector('.modeSelect');
-    const bitrateSelect = entryEl.querySelector('.bitrateSelect'); // updated
+    const bitrateSelect = entryEl.querySelector('.bitrateSelect');
     const toggleStatsBtn = entryEl.querySelector('.toggleStatsBtn');
 
     document.getElementById('remotesContainer').appendChild(entryEl);
