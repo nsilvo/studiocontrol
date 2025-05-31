@@ -5,17 +5,42 @@
   <title>Studio Control Interface</title>
   <link rel="stylesheet" href="style.css" />
   <style>
+    /* PPM meter styling */
     .ppm-meter {
       background: #333;
       border: 1px solid #555;
       margin-bottom: 10px;
     }
+    /* Graph canvas styling */
     .graph-canvas {
       background: #222;
       border: 1px solid #555;
       margin-bottom: 10px;
     }
+    /* Bitrate selector styling */
     .bitrate-select {
+      margin-left: 10px;
+      margin-right: 20px;
+    }
+    /* Waveform & recording UI */
+    .recording-controls {
+      margin: 20px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .waveform-canvas {
+      background: #111;
+      border: 1px solid #555;
+      margin-right: 20px;
+    }
+    .record-timer {
+      font-family: monospace;
+      font-size: 1.2em;
+      margin-left: 10px;
+    }
+    /* Caller routing dropdown */
+    .route-select {
       margin-left: 10px;
     }
   </style>
@@ -26,13 +51,27 @@
   </header>
 
   <div class="container">
-    <!-- Section: Studio Mic Level (PPM) -->
+    <!-- SECTION: Studio Mic PPM -->
     <div class="section" id="studio-meter-section">
       <h2>Studio Mic Level (PPM)</h2>
       <canvas id="studio-meter" class="ppm-meter" width="300" height="50"></canvas>
     </div>
 
-    <!-- Section: Waiting & Connected Contributors -->
+    <!-- SECTION: Multi-Track Recording Controls -->
+    <div class="section" id="recording-section">
+      <h2>Multi-Track Recording</h2>
+      <div class="recording-controls">
+        <button id="startRecBtn">Start Recording</button>
+        <button id="stopRecBtn" disabled>Stop Recording</button>
+        <span class="record-timer" id="recordTimer">00:00:00</span>
+      </div>
+      <div id="waveforms-container" style="display: flex; gap: 20px; flex-wrap: wrap;">
+        <!-- Waveform canvases will be inserted here dynamically:
+             One per track: studio + each remote -->
+      </div>
+    </div>
+
+    <!-- SECTION: Waiting & Connected Contributors -->
     <div class="section" id="contributors-section">
       <h2>Waiting Contributors</h2>
       <ul id="waiting-list"></ul>
@@ -41,7 +80,7 @@
       <ul id="contributors-list"></ul>
     </div>
 
-    <!-- Section: Chat -->
+    <!-- SECTION: Chat -->
     <div class="section" id="chat-section">
       <h2>Studio Chat</h2>
       <div class="chat-window" id="chatWindow"></div>

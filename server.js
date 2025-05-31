@@ -1,463 +1,357 @@
 /**
  * server.js
  *
- * Node.js signaling server for WebRTC remote audio contributions,
- * now supporting two-way audio (studio ↔ remote) and "mute-update" forwarding.
+ * Node.js WebSocket signaling server for:
+ *  - WebRTC peer connections (audio)
+ *  - Exchanging SDP offers/answers and ICE candidates
+ *  - Room-based or ID-based pairing (in this case: “studio” ↔ multiple remotes)
+ *  - Chat messages
+ *  - Mute/unmute, kick, bitrate updates
+ *  - Sports-specific messages: score-update, goal, reporter-recording
+ *
+ * Uses:
+ *  - ws library
+ *  - winston for rotating log files
+ *  - origin check: only accept wss://webrtc.brfm.net
  */
 
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
-const express = require('express');
-const { WebSocketServer } = require('ws');
-const winston = require('winston');
-require('winston-daily-rotate-file');
-const { v4: uuidv4 } = require('uuid');
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import url from 'url';
+import WebSocket, { WebSocketServer } from 'ws';
+import winston from 'winston';
+import 'winston-daily-rotate-file';
 
-/////////////////////////////////////////////////////
-// 1. CONFIGURATION
-/////////////////////////////////////////////////////
+// --- Logger Setup ---
+const logDir = 'logs';
+if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
 
-const PORT = process.env.PORT || 3030;
-const ALLOWED_ORIGIN = 'https://webrtc.brfm.net'; // only accept WS from this origin
-const LOG_DIR = path.join(__dirname, 'logs');
-
-// Ensure log directory exists
-if (!fs.existsSync(LOG_DIR)) {
-  fs.mkdirSync(LOG_DIR);
-}
-
-// Winston logger with daily rotation
 const transport = new winston.transports.DailyRotateFile({
-  filename: path.join(LOG_DIR, 'signal-%DATE%.log'),
+  filename: path.join(logDir, '%DATE%.log'),
   datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
+  zippedArchive: false,
   maxFiles: '14d',
 });
 
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
-    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    winston.format.timestamp(),
     winston.format.printf(
-      (info) => `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
+      ({ timestamp, level, message }) => `${timestamp} ${level}: ${message}`
     )
   ),
   transports: [transport],
 });
 
-/////////////////////////////////////////////////////
-// 2. EXPRESS SETUP (SERVE STATIC)
-/////////////////////////////////////////////////////
-
-const app = express();
-const publicPath = path.join(__dirname, 'public');
-app.use(express.static(publicPath));
-
-// Create HTTP server
-const server = http.createServer(app);
-
-// Create WebSocket server (noServer: true so we can do our own origin check)
-const wss = new WebSocketServer({ noServer: true });
-
-// Mapping: remoteID -> { socket, name, state }
-// state ∈ { waiting, connecting, offered, connected }
-const remotes = new Map();
-// Single studio socket (if connected)
-let studioSocket = null;
-
-/**
- * Send a JSON‐serializable object to one WebSocket.
- */
-function sendToSocket(ws, messageObj) {
-  try {
-    ws.send(JSON.stringify(messageObj));
-  } catch (err) {
-    logger.error(`Failed to send to socket: ${err.message}`);
-  }
-}
-
-/**
- * Send to the studio (if connected).
- */
-function sendToStudio(messageObj) {
-  if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-    sendToSocket(studioSocket, messageObj);
-  }
-}
-
-/**
- * Send to a specific remote (if exists).
- */
-function sendToRemote(remoteID, messageObj) {
-  const entry = remotes.get(remoteID);
-  if (entry && entry.socket.readyState === entry.socket.OPEN) {
-    sendToSocket(entry.socket, messageObj);
-  }
-}
-
-/////////////////////////////////////////////////////
-// 3. WS CONNECTION & SIGNALING LOGIC
-/////////////////////////////////////////////////////
-
-// Handle HTTP → upgrade to WebSocket
-server.on('upgrade', (request, socket, head) => {
-  const origin = request.headers.origin;
-  if (origin !== ALLOWED_ORIGIN) {
-    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-    socket.destroy();
-    logger.warn(`WebSocket connection from disallowed origin: ${origin}`);
-    return;
+// --- HTTP Server (serves static files) ---
+const httpServer = http.createServer((req, res) => {
+  // Only serve files from ./public by default
+  let parsedUrl = url.parse(req.url);
+  let pathname = `./public${parsedUrl.pathname}`;
+  if (parsedUrl.pathname === '/') {
+    pathname = './public/index.html';
   }
 
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
+  const ext = path.parse(pathname).ext;
+  const map = {
+    '.html': 'text/html',
+    '.js': 'text/javascript',
+    '.css': 'text/css',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.webm': 'video/webm',
+    '.json': 'application/json',
+  };
+
+  fs.exists(pathname, (exist) => {
+    if (!exist) {
+      res.statusCode = 404;
+      res.end(`File ${pathname} not found!`);
+      return;
+    }
+
+    // If directory, serve index.html inside
+    if (fs.statSync(pathname).isDirectory()) {
+      pathname += '/index.html';
+    }
+
+    fs.readFile(pathname, (err, data) => {
+      if (err) {
+        res.statusCode = 500;
+        res.end(`Error getting file: ${err}.`);
+      } else {
+        res.setHeader('Content-type', map[ext] || 'text/plain');
+        res.end(data);
+      }
+    });
   });
 });
 
-// Ping/Pong heartbeat to detect stale clients
-function heartbeat() {
-  this.isAlive = true;
+// --- WebSocket Server ---
+const wss = new WebSocketServer({ server: httpServer });
+
+const STUDIO_CLIENTS = new Set(); // sockets where role === 'studio'
+const REMOTE_CLIENTS = new Map();   // id → { ws, name, state } (state: 'waiting' | 'connected' | ...)
+
+function sendTo(ws, msg) {
+  ws.send(JSON.stringify(msg));
 }
 
+function broadcastToStudios(msg) {
+  STUDIO_CLIENTS.forEach((studioWs) => {
+    sendTo(studioWs, msg);
+  });
+}
+
+// Generate a simple UUID (v4-like) for remote IDs
+function generateID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0,
+      v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// On new WebSocket connection
 wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.on('pong', heartbeat);
+  // Origin check
+  const origin = req.headers.origin;
+  if (origin !== 'https://webrtc.brfm.net') {
+    logger.warn(`Rejected connection from origin: ${origin}`);
+    ws.close();
+    return;
+  }
 
-  ws.id = null;
-  ws.role = null;
-  ws.name = null;
+  let clientRole = null; // 'studio' or 'remote'
+  let clientID = null;
 
-  logger.info(`New WebSocket connection (ip=${req.socket.remoteAddress})`);
-
-  ws.on('message', (data) => {
+  ws.on('message', (message) => {
     let msg;
     try {
-      msg = JSON.parse(data.toString());
+      msg = JSON.parse(message);
     } catch (err) {
-      logger.warn(`Invalid JSON from client: ${err.message}`);
+      logger.error(`Invalid JSON: ${err}`);
       return;
     }
 
-    if (!msg.type) {
-      logger.warn('Received message without "type" field');
-      return;
-    }
+    const type = msg.type;
 
-    switch (msg.type) {
+    switch (type) {
+      // --------------------------
       case 'join':
-        /**
-         * { type: 'join', role: 'studio' | 'remote', name: '<displayName>' }
-         */
-        try {
-          const { role, name } = msg;
-          if (role !== 'studio' && role !== 'remote') {
-            throw new Error('Invalid role');
-          }
-          ws.role = role;
-          ws.name = String(name).slice(0, 50); // limit length
-
-          if (role === 'studio') {
-            if (studioSocket) {
-              sendToSocket(ws, { type: 'error', message: 'Studio already connected' });
-              ws.close();
-              logger.warn('Rejected second studio connection');
-              return;
-            }
-            ws.id = 'studio';
-            studioSocket = ws;
-            logger.info(`Studio joined (name=${ws.name})`);
-
-            // Send existing remotes to the newly-connected studio
-            const existing = [];
-            for (const [id, { name: rname, state }] of remotes.entries()) {
-              existing.push({ id, name: rname, state });
-            }
-            sendToSocket(ws, { type: 'existing-remotes', remotes: existing });
-          } else {
-            // A remote joins
-            const remoteID = uuidv4();
-            ws.id = remoteID;
-            remotes.set(remoteID, { socket: ws, name: ws.name, state: 'waiting' });
-            logger.info(`Remote joined (id=${remoteID}, name=${ws.name}, state=waiting)`);
-
-            sendToSocket(ws, { type: 'id-assigned', id: remoteID });
-
-            // Notify studio of new-waiting remote
-            if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-              sendToStudio({
-                type: 'new-remote',
-                id: remoteID,
-                name: ws.name,
-                state: 'waiting',
-              });
-            }
-          }
-        } catch (err) {
-          logger.error(`Error in join: ${err.message}`);
-          sendToSocket(ws, { type: 'error', message: 'Join failed' });
-        }
-        break;
-
-      case 'check-studio':
-        /**
-         * { type: 'check-studio' }
-         * Respond with: { type: 'studio-status', connected: true|false }
-         */
-        try {
-          const isConnected = !!(studioSocket && studioSocket.readyState === studioSocket.OPEN);
-          sendToSocket(ws, { type: 'studio-status', connected: isConnected });
-        } catch (err) {
-          logger.error(`Error handling check-studio: ${err.message}`);
-        }
-        break;
-
-      case 'connect-remote':
-        /**
-         * { type: 'connect-remote', from: 'studio', target: '<remoteID>' }
-         */
-        try {
-          const { from, target } = msg;
-          if (from !== 'studio') throw new Error('Only studio can connect remotes');
-          if (!target) throw new Error('Missing target remoteID');
-
-          const entry = remotes.get(target);
-          if (!entry) throw new Error(`Remote ${target} not found`);
-
-          entry.state = 'connecting';
-          logger.info(`Studio requested connection for remote ${target}`);
-
-          // Instruct remote to start-call
-          sendToRemote(target, { type: 'start-call' });
-
-          // Notify studio UI of state change
-          sendToStudio({ type: 'remote-state-change', id: target, state: 'connecting' });
-        } catch (err) {
-          logger.error(`Error in connect-remote: ${err.message}`);
-        }
-        break;
-
-      case 'offer':
-        /**
-         * { type: 'offer', from: '<remoteID>', sdp: '<SDP offer>' }
-         */
-        try {
-          const { from, sdp } = msg;
-          if (!from || !sdp) throw new Error('Missing fields in offer');
-          if (ws.role !== 'remote') throw new Error('Only remotes send offers');
-
-          const entry = remotes.get(from);
-          if (!entry || entry.state !== 'connecting') {
-            logger.warn(`Unexpected offer from remote ${from} in state ${entry?.state}`);
-            return;
-          }
-          entry.state = 'offered';
-
-          // Forward to studio
-          if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-            sendToStudio({ type: 'offer', from, sdp });
-            logger.info(`Forwarded offer from remote ${from} to studio`);
-          }
-        } catch (err) {
-          logger.error(`Error handling offer: ${err.message}`);
-        }
-        break;
-
-      case 'answer':
-        /**
-         * { type: 'answer', from: 'studio', target: '<remoteID>', sdp: '<SDP answer>' }
-         */
-        try {
-          const { from, target, sdp } = msg;
-          if (from !== 'studio') throw new Error('Only studio can send answers');
-          if (!target || !sdp) throw new Error('Missing fields in answer');
-
-          const entry = remotes.get(target);
-          if (!entry) throw new Error(`Remote ${target} not found`);
-          entry.state = 'connected';
-
-          // Forward to the remote
-          sendToRemote(target, { type: 'answer', from: 'studio', sdp });
-          logger.info(`Forwarded answer from studio to remote ${target}`);
-
-          // Notify studio UI of state change
-          sendToStudio({ type: 'remote-state-change', id: target, state: 'connected' });
-        } catch (err) {
-          logger.error(`Error handling answer: ${err.message}`);
-        }
-        break;
-
-      case 'candidate':
-        /**
-         * { type: 'candidate', from: '<senderID>', target: '<targetID>', candidate: { ... } }
-         */
-        try {
-          const { from, target, candidate } = msg;
-          if (!from || !target || !candidate) throw new Error('Missing fields in candidate');
-
-          if (target === 'studio') {
-            if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-              sendToStudio({ type: 'candidate', from, candidate });
-              logger.verbose(`Forwarded ICE candidate from ${from} to studio`);
-            }
-          } else {
-            sendToRemote(target, { type: 'candidate', from, candidate });
-            logger.verbose(`Forwarded ICE candidate from ${from} to remote ${target}`);
-          }
-        } catch (err) {
-          logger.error(`Error handling candidate: ${err.message}`);
-        }
-        break;
-
-      case 'mute-update':
-        /**
-         * { type: 'mute-update', from: <“studio”|remoteID>, target: <“studio”|remoteID>, muted: true|false }
-         *
-         * Forward to the specified target if connected.
-         */
-        try {
-          const { from, target, muted } = msg;
-          if (!from || !target || typeof muted !== 'boolean') {
-            throw new Error('Missing fields in mute-update');
-          }
-
-          if (target === 'studio') {
-            // Forward to studio
-            if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-              sendToStudio({ type: 'mute-update', from, muted });
-            }
-          } else {
-            // Forward to specific remote
-            const entry = remotes.get(target);
-            if (entry && entry.socket.readyState === entry.socket.OPEN) {
-              sendToRemote(target, { type: 'mute-update', from, muted });
-            }
-          }
-        } catch (err) {
-          logger.error(`Error handling mute-update: ${err.message}`);
-        }
-        break;
-
-      case 'kick-remote':
-        /**
-         * { type: 'kick-remote', from: 'studio', target: '<remoteID>' }
-         */
-        try {
-          const { from, target } = msg;
-          if (from !== 'studio') throw new Error('Only studio can kick remotes');
-          if (!target) throw new Error('Missing target remoteID');
-
-          const entry = remotes.get(target);
-          if (!entry) throw new Error(`Remote ${target} not found`);
-
-          // Inform remote it was kicked
-          sendToRemote(target, {
-            type: 'kicked',
-            reason: 'You have been disconnected by the studio.',
+        // { type:'join', role:'studio'|'remote', name, [teamA, teamB] for sports }
+        clientRole = msg.role;
+        if (clientRole === 'studio') {
+          STUDIO_CLIENTS.add(ws);
+          logger.info('Studio joined');
+          // Send existing remotes to this studio
+          const remotes = [];
+          REMOTE_CLIENTS.forEach((entry, id) => {
+            remotes.push({ id, name: entry.name, state: entry.state });
           });
-
-          // Close the remote's socket after a brief delay (so they receive "kicked" first)
-          setTimeout(() => {
-            if (entry.socket.readyState === entry.socket.OPEN) {
-              entry.socket.close();
-            }
-          }, 100);
-
-          // Remove from remotes map
-          remotes.delete(target);
-          logger.info(`Kicked remote ${target}`);
-
-          // Notify studio UI so it can remove that contributor from UI
-          sendToStudio({ type: 'remote-disconnected', id: target });
-        } catch (err) {
-          logger.error(`Error handling kick-remote: ${err.message}`);
+          sendTo(ws, { type: 'existing-remotes', remotes });
+        } else if (clientRole === 'remote' || clientRole === 'sports') {
+          // Assign an ID
+          clientID = generateID();
+          const name = msg.name || 'Unknown';
+          const state = 'waiting';
+          REMOTE_CLIENTS.set(clientID, {
+            ws,
+            name,
+            state,
+            teams: clientRole === 'sports' ? { teamA: msg.teamA, teamB: msg.teamB } : null,
+          });
+          // Notify this remote of its ID
+          sendTo(ws, { type: 'id-assigned', id: clientID });
+          // Notify all studios of new remote
+          broadcastToStudios({ type: 'new-remote', id: clientID, name, state });
+          logger.info(`Remote joined: ${clientID} (${name})`);
         }
         break;
 
+      // --------------------------
+      case 'connect-remote':
+        // { type:'connect-remote', from:'studio', target:remoteID }
+        if (clientRole === 'studio') {
+          const targetID = msg.target;
+          const entry = REMOTE_CLIENTS.get(targetID);
+          if (entry) {
+            entry.state = 'connecting';
+            // Update studio(s)
+            broadcastToStudios({ type: 'remote-state-change', id: targetID, state: 'connecting' });
+            // Ask remote to start call
+            sendTo(entry.ws, { type: 'start-call' });
+            logger.info(`Studio requested connection to remote ${targetID}`);
+          }
+        }
+        break;
+
+      // --------------------------
+      case 'offer':
+        // { type:'offer', from:remoteID, sdp }
+        // Forward to studio
+        if (clientRole === 'remote' || clientRole === 'sports') {
+          const fromID = msg.from;
+          const sdp = msg.sdp;
+          // Update remote state to 'offered'
+          const entry = REMOTE_CLIENTS.get(fromID);
+          if (entry) {
+            entry.state = 'offered';
+            broadcastToStudios({ type: 'remote-state-change', id: fromID, state: 'offered' });
+          }
+          // Forward to all studios (or you could forward to a single studio if you track them individually)
+          broadcastToStudios({ type: 'offer', from: fromID, sdp });
+          logger.info(`Forwarded offer from ${fromID} to studio`);
+        }
+        break;
+
+      // --------------------------
+      case 'answer':
+        // { type:'answer', from:'studio', target:remoteID, sdp }
+        // Forward to that remote
+        if (clientRole === 'studio') {
+          const targetID = msg.target;
+          const entry = REMOTE_CLIENTS.get(targetID);
+          if (entry) {
+            sendTo(entry.ws, { type: 'answer', from: 'studio', sdp: msg.sdp });
+            entry.state = 'connected';
+            broadcastToStudios({ type: 'remote-state-change', id: targetID, state: 'connected' });
+            logger.info(`Forwarded answer to remote ${targetID}`);
+          }
+        }
+        break;
+
+      // --------------------------
+      case 'candidate':
+        // { type:'candidate', from:<senderID>, target:<recipientID|'studio'>, candidate }
+        if (msg.target === 'studio') {
+          // From a remote to studio(s)
+          broadcastToStudios({ type: 'candidate', from: msg.from, candidate: msg.candidate });
+        } else {
+          // From studio to a specific remote
+          const entry = REMOTE_CLIENTS.get(msg.target);
+          if (entry) {
+            sendTo(entry.ws, { type: 'candidate', from: 'studio', candidate: msg.candidate });
+          }
+        }
+        break;
+
+      // --------------------------
+      case 'mute-update':
+        // { type:'mute-update', from:<studio|remote>, target:<studio|remote>, muted:true|false }
+        if (clientRole === 'studio') {
+          // Forward from studio to remote
+          const targetID = msg.target;
+          const entry = REMOTE_CLIENTS.get(targetID);
+          if (entry) {
+            sendTo(entry.ws, { type: 'mute-update', from: 'studio', muted: msg.muted });
+          }
+        } else if (clientRole === 'remote' || clientRole === 'sports') {
+          // Forward from remote to studio(s)
+          broadcastToStudios({ type: 'mute-update', from: msg.from, muted: msg.muted });
+        }
+        break;
+
+      // --------------------------
+      case 'bitrate-update':
+        // { type:'bitrate-update', from:'studio', target:remoteID, bitrate }
+        if (clientRole === 'studio') {
+          const entry = REMOTE_CLIENTS.get(msg.target);
+          if (entry) {
+            sendTo(entry.ws, { type: 'bitrate-update', bitrate: msg.bitrate });
+          }
+        }
+        break;
+
+      // --------------------------
+      case 'kick-remote':
+        // { type:'kick-remote', from:'studio', target:remoteID }
+        if (clientRole === 'studio') {
+          const targetID = msg.target;
+          const entry = REMOTE_CLIENTS.get(targetID);
+          if (entry) {
+            sendTo(entry.ws, { type: 'kicked', reason: 'Kicked by studio.' });
+            entry.ws.close();
+            // Will handle cleanup in 'close' event
+            logger.info(`Kicked remote ${targetID}`);
+          }
+        }
+        break;
+
+      // --------------------------
       case 'chat':
-        /**
-         * { type: 'chat', from: '<senderID>', name: '<displayName>', message: '<text>', target: '<targetID>|studio|all' }
-         */
-        try {
-          const { from, name, message, target } = msg;
-          if (!from || !name || !message || !target) {
-            throw new Error('Missing fields in chat');
-          }
-
-          const sanitized = String(message)
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .slice(0, 500);
-
-          const chatMsg = { type: 'chat', from, name, message: sanitized };
-
-          if (target === 'studio') {
-            sendToStudio(chatMsg);
-            logger.info(`Chat from ${from}→studio: ${sanitized}`);
-          } else if (target === 'all') {
-            sendToStudio(chatMsg);
-            for (const [id, { socket }] of remotes.entries()) {
-              if (socket.readyState === socket.OPEN) {
-                sendToSocket(socket, chatMsg);
-              }
-            }
-            logger.info(`Broadcast chat from ${from}: ${sanitized}`);
-          } else {
-            sendToRemote(target, chatMsg);
-            logger.info(`Chat from ${from}→remote ${target}: ${sanitized}`);
-          }
-        } catch (err) {
-          logger.error(`Error handling chat: ${err.message}`);
-        }
+        // { type:'chat', from:<id>, name:<string>, message:<string>, [target:'studio' ] }
+        // Always forward to studio(s)
+        broadcastToStudios({
+          type: 'chat',
+          from: msg.from,
+          name: msg.name,
+          message: msg.message,
+        });
         break;
 
+      // --------------------------
+      // SPORTS-SPECIFIC MESSAGES
+      // --------------------------
+
+      case 'score-update':
+        // { type:'score-update', from:<remoteID>, teamA, teamB, scoreA, scoreB }
+        // Forward to studio(s)
+        broadcastToStudios({
+          type: 'score-update',
+          teamA: msg.teamA,
+          teamB: msg.teamB,
+          scoreA: msg.scoreA,
+          scoreB: msg.scoreB,
+        });
+        logger.info(`Score update from ${msg.from}: ${msg.teamA} ${msg.scoreA}-${msg.scoreB} ${msg.teamB}`);
+        break;
+
+      case 'goal':
+        // { type:'goal', from:<remoteID> }
+        broadcastToStudios({ type: 'goal', from: msg.from });
+        logger.info(`Goal event from ${msg.from}`);
+        break;
+
+      case 'reporter-recording':
+        // { type:'reporter-recording', from:<remoteID>, name:<reporterName>, data:<base64> }
+        broadcastToStudios({
+          type: 'reporter-recording',
+          from: msg.from,
+          name: msg.name,
+          data: msg.data,
+        });
+        logger.info(`Received reporter segment from ${msg.from}`);
+        break;
+
+      // --------------------------
       default:
-        logger.warn(`Unknown message type: ${msg.type}`);
+        logger.warn(`Unknown message type: ${type}`);
+        break;
     }
   });
 
   ws.on('close', () => {
-    logger.info(`WebSocket closed (id=${ws.id}, role=${ws.role})`);
-
-    if (ws.role === 'studio') {
-      studioSocket = null;
-      // Notify all remotes that studio disconnected
-      for (const [id, { socket }] of remotes.entries()) {
-        if (socket.readyState === socket.OPEN) {
-          sendToSocket(socket, { type: 'studio-disconnected' });
-        }
-      }
-      logger.info('Studio disconnected; notified all remotes.');
-    } else if (ws.role === 'remote' && ws.id) {
-      const rid = ws.id;
-      const rname = remotes.get(rid)?.name;
-      remotes.delete(rid);
-      logger.info(`Remote removed (id=${rid}, name=${rname})`);
-
-      if (studioSocket && studioSocket.readyState === studioSocket.OPEN) {
-        sendToStudio({ type: 'remote-disconnected', id: rid });
+    // Remove from studio set or remote map
+    if (clientRole === 'studio') {
+      STUDIO_CLIENTS.delete(ws);
+      logger.info('Studio disconnected');
+    } else if (clientRole === 'remote' || clientRole === 'sports') {
+      if (clientID && REMOTE_CLIENTS.has(clientID)) {
+        REMOTE_CLIENTS.delete(clientID);
+        // Inform all studios that the remote disconnected
+        broadcastToStudios({ type: 'remote-disconnected', id: clientID });
+        logger.info(`Remote disconnected: ${clientID}`);
       }
     }
   });
 });
 
-// Ping/pong to detect stale connections every 30s
-const interval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (!ws.isAlive) {
-      logger.warn(`Terminating stale socket (id=${ws.id}, role=${ws.role})`);
-      return ws.terminate();
-    }
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, 30000);
-
-wss.on('close', () => clearInterval(interval));
-
-// Start the HTTP + WebSocket server
-server.listen(PORT, () => {
-  logger.info(`Server is running on port ${PORT}`);
-  console.log(`Signaling server listening on port ${PORT}`);
+// Start HTTP + WebSocket server on port 3030
+const PORT = process.env.PORT || 3030;
+httpServer.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+  logger.info(`Server started on port ${PORT}`);
 });
