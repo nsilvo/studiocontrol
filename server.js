@@ -22,7 +22,7 @@ const { v4: uuidv4 } = require('uuid');
 // 1. CONFIGURATION
 /////////////////////////////////////////////////////
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3030;
 const ALLOWED_ORIGIN = 'https://webrtc.brfm.net'; // only accept WS connections from this origin
 const LOG_DIR = path.join(__dirname, 'logs');
 
