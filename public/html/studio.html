@@ -4,227 +4,64 @@
   <meta charset="UTF-8" />
   <title>Studio Control Interface</title>
   <link rel="stylesheet" href="css/style.css" />
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
-      background: #f5f5f5;
-      color: #333;
-    }
-    h1, h2 {
-      margin-bottom: 10px;
-    }
-    button {
-      cursor: pointer;
-      border: none;
-      border-radius: 4px;
-      padding: 6px 10px;
-      background-color: #0066cc;
-      color: #fff;
-      font-size: 0.9em;
-      margin-right: 6px;
-    }
-    button:hover {
-      background-color: #005bb5;
-    }
-    button:disabled {
-      background-color: #999;
-      cursor: not-allowed;
-    }
-    #connStatus {
-      font-weight: bold;
-      color: #0066cc;
-    }
-    #chatContainer {
-      margin-top: 20px;
-      border: 1px solid #ccc;
-      background: #fff;
-      border-radius: 6px;
-      padding: 10px;
-      max-width: 800px;
-    }
-    #chatWindow {
-      height: 150px;
-      overflow-y: auto;
-      border: 1px solid #ccc;
-      padding: 8px;
-      background: #fefefe;
-      margin-bottom: 8px;
-    }
-    #chatInput {
-      width: calc(100% - 100px);
-      padding: 6px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 0.9em;
-      margin-right: 8px;
-    }
-    #sendChatBtn {
-      background-color: #28a745;
-    }
-    #sendChatBtn:hover {
-      background-color: #218838;
-    }
-    #recordControls {
-      margin-top: 30px;
-      max-width: 800px;
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      padding: 10px;
-    }
-    #recordControls button {
-      margin-right: 10px;
-      padding: 8px 12px;
-    }
-    #recTimer {
-      font-weight: bold;
-      margin-left: 10px;
-    }
-    #waveformCanvas {
-      display: block;
-      margin-top: 10px;
-      border: 1px solid #666;
-      background: #222;
-      width: 100%;
-      height: 200px;
-    }
-    #remotesContainer {
-      margin-top: 30px;
-      max-width: 1000px;
-    }
-    .remote-entry {
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      padding: 12px;
-      margin-bottom: 20px;
-    }
-    .remote-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 10px;
-    }
-    .remote-name {
-      font-size: 1.2em;
-      font-weight: bold;
-    }
-    .remote-status {
-      font-size: 0.9em;
-      color: #0066cc;
-      margin-left: 10px;
-    }
-    .remote-controls {
-      margin-top: 8px;
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    .remote-controls > * {
-      margin-right: 8px;
-      margin-top: 4px;
-    }
-    .remote-meter,
-    .jitter-graph,
-    .bitrate-graph {
-      display: inline-block;
-      vertical-align: top;
-      margin-top: 10px;
-      margin-right: 20px;
-    }
-    .remote-meter canvas,
-    .jitter-graph canvas,
-    .bitrate-graph canvas {
-      border: 1px solid #aaa;
-      background: #222;
-      display: block;
-    }
-    .graph-label {
-      font-size: 0.8em;
-      text-align: center;
-      margin-top: 4px;
-      color: #444;
-    }
-    .chat-section {
-      margin-top: 10px;
-      width: 100%;
-    }
-    .chat-section .chat-window {
-      height: 100px;
-      margin-bottom: 5px;
-      background: #fafafa;
-    }
-    .chat-input {
-      width: calc(100% - 80px);
-      padding: 6px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      margin-right: 5px;
-    }
-    .chat-send-btn {
-      padding: 6px 10px;
-      background-color: #28a745;
-    }
-    .chat-send-btn:hover {
-      background-color: #218838;
-    }
-    /* New: style the remote <audio> so we can hear each remote */
-    .remote-audio {
-      margin-top: 6px;
-      width: 100%;
-    }
-  </style>
 </head>
 <body>
-  <h1>Studio Control Interface</h1>
-  <div>
-    WebSocket status: <span id="connStatus">not connected</span>
+  <div class="card" style="max-width: 900px; margin: 20px auto;">
+    <h1>Studio Control</h1>
+    <div>
+      <span style="color: var(--text-secondary);">WebSocket:</span>
+      <span id="connStatus">Not connected</span>
+    </div>
   </div>
 
-  <!-- Chat Section -->
-  <div id="chatContainer">
+  <!-- Global Chat Section -->
+  <div id="chatContainer" class="card">
     <h2>Studio Chat</h2>
     <div id="chatWindow"></div>
-    <input id="chatInput" type="text" placeholder="Type a message..." />
-    <button id="sendChatBtn">Send</button>
+    <div class="flex-row mt-10">
+      <input id="chatInput" type="text" placeholder="Type a message..." />
+      <button id="sendChatBtn" class="btn">Send</button>
+    </div>
   </div>
 
   <!-- Recording Controls -->
-  <div id="recordControls">
+  <div id="recordControls" class="card">
     <h2>Recording Controls</h2>
-    <button id="recordBtn">Start Recording</button>
-    <button id="stopRecordBtn" disabled>Stop Recording</button>
-    <span id="recTimer">00:00</span>
-    <canvas id="waveformCanvas"></canvas>
+    <button id="recordBtn" class="btn">Start Recording</button>
+    <button id="stopRecordBtn" class="btn" disabled>Stop Recording</button>
+    <span id="recTimer" style="margin-left: 12px;">00:00</span>
+    <canvas id="waveformCanvas" class="mt-10"></canvas>
   </div>
 
-  <!-- Connected Remotes -->
-  <h2>Connected Remotes</h2>
-  <div id="remotesContainer"></div>
+  <!-- Connected Remotes List -->
+  <div class="card" style="max-width: 1000px; margin: 20px auto;">
+    <h2>Connected Remotes</h2>
+    <div id="remotesContainer"></div>
+  </div>
 
   <!-- Template for a single remote entry -->
   <template id="remoteEntryTemplate">
     <div class="remote-entry">
       <div class="remote-header">
-        <div>
+        <div class="flex-row align-center gap-10">
           <span class="remote-name">Remote Name</span>
           <span class="remote-status">(status)</span>
         </div>
-        <div>
-          <button class="callRemoteBtn">Call</button>
-          <button class="muteRemoteBtn">Mute</button>
-          <button class="kickRemoteBtn">Kick</button>
+        <div class="flex-row gap-10">
+          <button class="callRemoteBtn btn">Call</button>
+          <button class="muteRemoteBtn btn">Mute</button>
+          <button class="kickRemoteBtn btn">Kick</button>
         </div>
       </div>
-      <div class="remote-controls">
-        <label>Mode:</label>
+
+      <div class="remote-controls flex-row flex-wrap gap-10">
+        <label for="mode">Mode:</label>
         <select class="modeSelect">
           <option value="speech">Speech</option>
-          <option value="music">Music</option>
+          <option value="music" selected>Music</option>
         </select>
 
-        <label>Bitrate:</label>
+        <label for="bitrate">Bitrate:</label>
         <input type="number" class="bitrateInput" min="1000" max="128000" value="64000" />
 
         <div class="remote-meter">
@@ -242,19 +79,20 @@
           <div class="graph-label">Bitrate</div>
         </div>
 
-        <!-- NEW: Audio element so studio can hear this remote -->
-        <audio class="remote-audio" controls autoplay></audio>
+        <audio class="remote-audio mt-10" controls autoplay></audio>
 
-        <div class="chat-section">
+        <div class="chat-section mt-10" style="width: 100%;">
           <div class="chat-window"></div>
-          <input type="text" class="chat-input" placeholder="Type message..." />
-          <button class="chat-send-btn">Send</button>
+          <div class="flex-row mt-6">
+            <input type="text" class="chat-input" placeholder="Type message..." />
+            <button class="chat-send-btn btn">Send</button>
+          </div>
         </div>
       </div>
     </div>
   </template>
 
-  <!-- Pre‐set this page’s studio ID before loading the main logic -->
+  <!-- Pre‐set this page’s studio ID (if you want multiple studios) -->
   <script>
     window.STUDIO_ID = "Studio";
   </script>

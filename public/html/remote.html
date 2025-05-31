@@ -4,154 +4,46 @@
   <meta charset="UTF-8" />
   <title>Remote Contributor</title>
   <link rel="stylesheet" href="css/style.css" />
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
-      background: #f5f5f5;
-      color: #333;
-    }
-    h1 {
-      margin-bottom: 10px;
-    }
-    .hidden {
-      display: none;
-    }
-    #name-step {
-      max-width: 400px;
-      margin: 50px auto;
-      padding: 20px;
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      text-align: center;
-    }
-    #name-step input {
-      width: 80%;
-      padding: 8px;
-      margin-bottom: 10px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 14px;
-    }
-    #name-step button {
-      padding: 8px 16px;
-      background: #0066cc;
-      color: #fff;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    #name-step button:hover {
-      background: #005bb5;
-    }
-    #main-ui {
-      max-width: 800px;
-      margin: 0 auto;
-    }
-    #display-name {
-      font-weight: bold;
-      margin-bottom: 10px;
-    }
-    #connStatus {
-      font-weight: bold;
-      color: #0066cc;
-      margin-bottom: 15px;
-      display: block;
-    }
-    #controls button {
-      margin-right: 10px;
-      padding: 8px 12px;
-      border: none;
-      background-color: #0066cc;
-      color: #fff;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    #controls button:hover {
-      background-color: #005bb5;
-    }
-    #meter-canvas {
-      border: 1px solid #ccc;
-      background: #222;
-      width: 100%;
-      height: 60px;
-      margin-bottom: 15px;
-    }
-    #chat-container {
-      margin-top: 15px;
-    }
-    #chatWindow {
-      border: 1px solid #ccc;
-      background: #fff;
-      height: 150px;
-      overflow-y: auto;
-      padding: 5px;
-      margin-bottom: 5px;
-    }
-    #chatInput {
-      width: calc(100% - 100px);
-      padding: 8px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-    }
-    #sendChatBtn {
-      padding: 8px 12px;
-      border: none;
-      background-color: #28a745;
-      color: #fff;
-      border-radius: 4px;
-      cursor: pointer;
-      margin-left: 5px;
-    }
-    #sendChatBtn:hover {
-      background-color: #218838;
-    }
-    /* The newly added audio element for studio audio */
-    #audio-studio {
-      display: block;
-      margin-top: 10px;
-      width: 100%;
-    }
-  </style>
 </head>
 <body>
   <!-- Step 1: Enter name only -->
-  <div id="name-step">
-    <h1>Welcome, Contributor</h1>
-    <p>Please enter your name to continue:</p>
-    <input id="nameInput" type="text" placeholder="Enter your name" />
-    <br />
-    <button id="nameSubmitBtn">Continue</button>
+  <div id="name-step" class="card">
+    <h1>Remote Contributor</h1>
+    <p style="color: var(--text-secondary); margin-bottom:12px;">
+      Enter your display name to join.
+    </p>
+    <input id="nameInput" type="text" placeholder="Your Name" />
+    <br /><br />
+    <button id="nameSubmitBtn" class="btn">Continue</button>
   </div>
 
   <!-- Step 2: Main UI (hidden until name submitted) -->
-  <div id="main-ui" class="hidden">
-    <h1>Remote Contributor Interface</h1>
+  <div id="main-ui" class="card hidden">
+    <h1>Remote Interface</h1>
     <div id="display-name"></div>
     <div>
-      Connection status: <span id="connStatus">not connected</span>
+      <span style="color: var(--text-secondary);">Status:</span>
+      <span id="connStatus">Not connected</span>
     </div>
 
-    <div id="controls">
-      <button id="muteSelfBtn">Mute Myself</button>
-      <button id="toneBtn">Send GLITS Tone</button>
-      <button id="listenStudioBtn">Mute Studio Audio</button>
+    <div id="controls" class="mt-10">
+      <button id="muteSelfBtn" class="btn">Mute Myself</button>
+      <button id="toneBtn" class="btn">Send GLITS Tone</button>
+      <button id="listenStudioBtn" class="btn">Mute Studio</button>
     </div>
 
-    <canvas id="meter-canvas"></canvas>
+    <canvas id="meter-canvas" class="mt-20"></canvas>
 
-    <div id="chat-container">
+    <div id="chat-container" class="mt-20">
       <h3>Chat</h3>
       <div id="chatWindow"></div>
-      <div style="display: flex; margin-top: 5px;">
-        <input type="text" id="chatInput" placeholder="Type message..." />
-        <button id="sendChatBtn">Send</button>
+      <div class="flex-row mt-10">
+        <input type="text" id="chatInput" placeholder="Type a message..." />
+        <button id="sendChatBtn" class="btn">Send</button>
       </div>
     </div>
 
-    <!-- NEW: audio element for any incoming audio track from studio -->
-    <audio id="audio-studio" autoplay controls></audio>
+    <audio id="audio-studio" class="mt-20" controls autoplay></audio>
   </div>
 
   <script src="js/common.js"></script>
