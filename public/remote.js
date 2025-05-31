@@ -1,20 +1,15 @@
 /**
- * remote.js (v5)
+ * remote.js (v5.1)
  *
  * Two‐step remote flow:
  *  1. Prompt for name (Step 1).
  *  2. Once name is entered, reveal main UI, show displayName, and start WebSocket/RTC.
  *
- * Features:
- *  • Send name in join message.
- *  • WebRTC audio (Opus 48kHz stereo) via TURN/STUN.
- *  • GLITS tone toggle.
- *  • Mute/unmute self on studio request.
- *  • Listen to studio audio toggle.
- *  • Local PPM meter.
- *  • Dynamic bitrate updates from studio.
- *  • Chat to studio.
- *  • Auto‐reconnect on WS close.
+ * GLITS tone implementation:
+ *  - 1 kHz sine at –18 dBFS (gain ≈ 0.1259) on both channels continuously.
+ *  - Every 4 s (cycle):
+ *      • Left channel silent for 250 ms (4.00–4.25 s).
+ *      • 250 ms later (at 4.25 s), Right channel silent 250 ms (4.25–4.50), then on 250 ms (4.50–4.75), then silent 250 ms (4.75–5.00), then back on until next 4 s.
  */
 
 (() => {
@@ -37,10 +32,15 @@
   let displayName = ''; // Will be set from name input
   let isMuted = false;
   let isTone = false;
-  let toneOscillator = null;
+
+  // GLITS‐tone nodes:
   let toneContext = null;
-  let toneDestination = null;
-  let toneTimer = null;
+  let leftOsc = null;
+  let rightOsc = null;
+  let gainLeft = null;
+  let gainRight = null;
+  let merger = null;
+  let glitsInterval = null; // setInterval reference
 
   // DOM elements (after Step 1)
   let nameInput;
@@ -85,7 +85,7 @@
       nameStepDiv.classList.add('hidden');
       mainUiDiv.classList.remove('hidden');
       displayNameDiv.textContent = `Name: ${displayName}`;
-      // Now initialize the rest of the UI/sockets
+      // Now initialize the rest of the UI and start WS/RTC
       initMainUI();
       initWebSocket();
     };
@@ -320,7 +320,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Local audio meter
+  // Local audio PPM meter
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -371,7 +371,12 @@
       // Draw right channel (blue)
       meterContext.fillStyle = '#2196f3';
       const widthR = Math.round(rmsR * meterCanvas.width);
-      meterContext.fillRect(0, meterCanvas.height / 2 + 1, widthR, meterCanvas.height / 2 - 1);
+      meterContext.fillRect(
+        0,
+        meterCanvas.height / 2 + 1,
+        widthR,
+        meterCanvas.height / 2 - 1
+      );
 
       requestAnimationFrame(draw);
     }
@@ -436,49 +441,141 @@
   }
 
   /////////////////////////////////////////////////////
-  // Toggle sending a GLITS tone
+  // Toggle GLITS Tone
   /////////////////////////////////////////////////////
   function toggleTone() {
-    if (!audioSender) return;
-
     if (!isTone) {
-      toneContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 48000,
-      });
-      toneDestination = toneContext.createMediaStreamDestination();
-
-      toneOscillator = toneContext.createOscillator();
-      toneOscillator.type = 'sine';
-      toneOscillator.frequency.setValueAtTime(400, toneContext.currentTime);
-      toneOscillator.connect(toneDestination);
-      toneOscillator.start();
-
-      const toneTrack = toneDestination.stream.getAudioTracks()[0];
-      audioSender.replaceTrack(toneTrack);
-
-      let currentFreq = 400;
-      toneTimer = setInterval(() => {
-        currentFreq = currentFreq === 400 ? 1000 : 400;
-        toneOscillator.frequency.setValueAtTime(currentFreq, toneContext.currentTime);
-      }, 1000);
-
-      setupLocalMeter(toneDestination.stream);
-
+      startGlitsTone();
       isTone = true;
       toneBtn.textContent = 'Stop GLITS Tone';
     } else {
-      clearInterval(toneTimer);
-      toneOscillator.stop();
-      toneOscillator.disconnect();
-      toneDestination.disconnect();
-
-      const micTrack = localStream.getAudioTracks()[0];
-      audioSender.replaceTrack(micTrack);
-      setupLocalMeter(localStream);
-
+      stopGlitsTone();
       isTone = false;
       toneBtn.textContent = 'Send GLITS Tone';
     }
+  }
+
+  /////////////////////////////////////////////////////
+  // Start GLITS Tone
+  /////////////////////////////////////////////////////
+  function startGlitsTone() {
+    if (!audioSender) return;
+
+    // 1 kHz sine on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
+    const amplitude = 0.125892541;
+
+    toneContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
+
+    // Create oscillators for left & right
+    leftOsc = toneContext.createOscillator();
+    rightOsc = toneContext.createOscillator();
+    leftOsc.type = 'sine';
+    rightOsc.type = 'sine';
+    leftOsc.frequency.setValueAtTime(1000, toneContext.currentTime);
+    rightOsc.frequency.setValueAtTime(1000, toneContext.currentTime);
+
+    // Create gain nodes
+    gainLeft = toneContext.createGain();
+    gainRight = toneContext.createGain();
+    gainLeft.gain.value = amplitude;
+    gainRight.gain.value = amplitude;
+
+    // Create merger (2 inputs → stereo)
+    merger = toneContext.createChannelMerger(2);
+
+    // Connect leftOsc → gainLeft → merger input 0
+    leftOsc.connect(gainLeft);
+    gainLeft.connect(merger, 0, 0);
+
+    // Connect rightOsc → gainRight → merger input 1
+    rightOsc.connect(gainRight);
+    gainRight.connect(merger, 0, 1);
+
+    // Start oscillators
+    leftOsc.start();
+    rightOsc.start();
+
+    // Connect merged stereo to a MediaStreamDestination
+    const dest = toneContext.createMediaStreamDestination();
+    merger.connect(dest);
+
+    // Replace outgoing track with the new stereo GLITS stream
+    const toneTrack = dest.stream.getAudioTracks()[0];
+    audioSender.replaceTrack(toneTrack);
+
+    // Schedule the first GLITS‐cycle 4 s from now
+    setGlitsSchedule();
+    glitsInterval = setInterval(setGlitsSchedule, 4000);
+
+    // Also draw local meter from GLITS source
+    setupLocalMeter(dest.stream);
+  }
+
+  /////////////////////////////////////////////////////
+  // Stop GLITS Tone
+  /////////////////////////////////////////////////////
+  function stopGlitsTone() {
+    if (glitsInterval) {
+      clearInterval(glitsInterval);
+      glitsInterval = null;
+    }
+    if (leftOsc) {
+      leftOsc.stop();
+      leftOsc.disconnect();
+      leftOsc = null;
+    }
+    if (rightOsc) {
+      rightOsc.stop();
+      rightOsc.disconnect();
+      rightOsc = null;
+    }
+    if (gainLeft) {
+      gainLeft.disconnect();
+      gainLeft = null;
+    }
+    if (gainRight) {
+      gainRight.disconnect();
+      gainRight = null;
+    }
+    if (merger) {
+      merger.disconnect();
+      merger = null;
+    }
+
+    // Restore mic track
+    if (localStream) {
+      const micTrack = localStream.getAudioTracks()[0];
+      audioSender.replaceTrack(micTrack);
+      setupLocalMeter(localStream);
+    }
+  }
+
+  /////////////////////////////////////////////////////
+  // Schedule one GLITS Tone cycle
+  /////////////////////////////////////////////////////
+  function setGlitsSchedule() {
+    if (!toneContext || !gainLeft || !gainRight) return;
+
+    // Use audioContext.currentTime as the base
+    const base = toneContext.currentTime;
+
+    // 1) Left channel: silent from base → base+0.25, then restore until next cycle
+    gainLeft.gain.setValueAtTime(0, base);
+    gainLeft.gain.setValueAtTime(0.125892541, base + 0.25);
+
+    // 2) Right channel:  
+    //    - Tone on from base → base+0.25  
+    gainRight.gain.setValueAtTime(0.125892541, base);
+    //    - Silence from base+0.25 → base+0.50  
+    gainRight.gain.setValueAtTime(0, base + 0.25);
+    //    - Tone from base+0.50 → base+0.75  
+    gainRight.gain.setValueAtTime(0.125892541, base + 0.50);
+    //    - Silence from base+0.75 → base+1.00  
+    gainRight.gain.setValueAtTime(0, base + 0.75);
+    //    - Tone from base+1.00 → next cycle  
+    gainRight.gain.setValueAtTime(0.125892541, base + 1.00);
   }
 
   /////////////////////////////////////////////////////
@@ -521,31 +618,4 @@
   window.addEventListener('load', () => {
     initNameStep();
   });
-
-  /////////////////////////////////////////////////////
-  // Initialize the Name step
-  /////////////////////////////////////////////////////
-  function initNameStep() {
-    nameInput = document.getElementById('nameInput');
-    nameSubmitBtn = document.getElementById('nameSubmitBtn');
-    nameStepDiv = document.getElementById('name-step');
-    mainUiDiv = document.getElementById('main-ui');
-    displayNameDiv = document.getElementById('display-name');
-
-    nameSubmitBtn.onclick = () => {
-      const typed = nameInput.value.trim();
-      if (typed === '') {
-        alert('Please enter a name before continuing.');
-        return;
-      }
-      displayName = typed;
-      // Hide name step, reveal main UI
-      nameStepDiv.classList.add('hidden');
-      mainUiDiv.classList.remove('hidden');
-      displayNameDiv.textContent = `Name: ${displayName}`;
-      // Now initialize the rest of the UI and start WS/RTC
-      initMainUI();
-      initWebSocket();
-    };
-  }
 })();
