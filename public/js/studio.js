@@ -7,11 +7,31 @@
  *     • Creates a horizontal VU‐meter card (300×20) appended to #mainVuContainer.
  *     • Creates a 250×150 remote‐entry card with Call, Mute/Unmute, Mode, BitrateSelect, Toggle Stats.
  * - Single global chat → broadcast to all remotes.
- * - Recording controls remain unchanged.
+ * - Recording controls unchanged.
  * - WebSocket keepalives every 30s to avoid idle‐timeout drops.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
+  // ────────────────────────────────────────────────────────────────────────
+  // 0) KEEPALIVE HELPERS (top‐level)
+  // ────────────────────────────────────────────────────────────────────────
+  let keepaliveIntervalId = null;
+  function startKeepalive(ws) {
+    if (keepaliveIntervalId) return;
+    keepaliveIntervalId = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'keepalive' }));
+      }
+    }, 30000);
+  }
+  function stopKeepalive() {
+    if (keepaliveIntervalId) {
+      clearInterval(keepaliveIntervalId);
+      keepaliveIntervalId = null;
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
+
   // ────────────────────────────────────────────────────────────────────────
   // 1) ICE & WS CONFIG
   // ────────────────────────────────────────────────────────────────────────
@@ -208,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
       connStatusSpan.textContent = 'Connected';
       ws.send(JSON.stringify({ type: 'join', role: 'studio', studioId: window.STUDIO_ID || 'Studio' }));
       // Start keepalives every 30 seconds
-      startKeepalive();
+      startKeepalive(ws);
     };
 
     ws.onmessage = (evt) => {
