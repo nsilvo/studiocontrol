@@ -1,12 +1,24 @@
 /**
- * public/js/remote.js (updated GLITS tone logic)
+ * public/js/remote.js
  *
  * - Two‐step remote flow:
- *    1. Prompt for name.
- *    2. Once name is submitted, initialize UI, mic, and WebSocket/RTC.
+ *    1. Prompt for name (Step 1).
+ *    2. Once name is submitted, reveal main UI, show displayName, set up a
+ *       stereo mic capture with a –14 dBFS compressor, and start WebSocket/RTC.
  *
- * - Listens for “mode‐update” and “bitrate‐update” from studio.
- * - GLITS tone button is only enabled once WebRTC audioSender is set up.
+ * - Listens for studio “mode‐update” messages to switch between:
+ *     • speech → mono (1 channel)
+ *     • music  → stereo (2 channels)
+ *   Automatically re‐negotiates the connection when mode changes.
+ *
+ * - Listens for studio “bitrate-update” messages to adjust encoder bitrate.
+ *
+ * - All outgoing audio is passed through a DynamicsCompressorNode (threshold −14 dBFS).
+ *
+ * - PPM meter always displays two bars (left + right). If only 1 channel is active,
+ *   it displays the same data on both bars (effectively a mono display).
+ *
+ * - GLITS tone can be toggled once WebRTC is established.
  */
 
 (() => {
@@ -170,37 +182,47 @@
   /////////////////////////////////////////////////////
   async function handleSignalingMessage(msg) {
     switch (msg.type) {
-      case 'id-assigned':
-        // { type:'id-assigned', id }
+      case 'joined':
+        // The server confirmed our join and gave us an ID.
+        // Treat like "id-assigned".
+        //
+        // { type: "joined", id: "<some-uuid>" }
         localID = msg.id;
-        console.log('[remote] Assigned ID:', localID);
+        console.log('[remote] Joined as ID:', localID);
+        statusSpan.textContent = 'Waiting for studio';
+        break;
+
+      case 'id-assigned':
+        // { type: 'id-assigned', id }
+        localID = msg.id;
+        console.log('[remote] Assigned localID:', localID);
         statusSpan.textContent = 'Waiting for studio';
         break;
 
       case 'start-call':
-        // Studio asks us to start WebRTC
+        // { type: 'start-call' }
         statusSpan.textContent = 'Connecting (WebRTC)...';
         await startWebRTC();
         break;
 
       case 'answer':
-        // { type:'answer', sdp }
+        // { type: 'answer', sdp }
         await handleAnswer(msg.sdp);
         break;
 
       case 'candidate':
-        // { type:'candidate', candidate }
+        // { type: 'candidate', candidate }
         await handleCandidate(msg.candidate);
         break;
 
       case 'mode-update':
-        // { type:'mode-update', mode: 'speech'|'music' }
+        // { type: 'mode-update', mode: 'speech'|'music' }
         console.log('[remote] Received mode-update:', msg.mode);
         await applyMode(msg.mode);
         break;
 
       case 'bitrate-update':
-        // { type:'bitrate-update', bitrate:<number> }
+        // { type: 'bitrate-update', bitrate:<number> }
         console.log('[remote] Received bitrate-update:', msg.bitrate);
         setAudioBitrate(msg.bitrate);
         break;
@@ -211,7 +233,7 @@
         break;
 
       case 'chat':
-        // { type:'chat', from:'Studio', message }
+        // { type:'chat', from:'Studio', text }
         appendChatMessage(msg.from, msg.text, false);
         break;
 
@@ -606,10 +628,10 @@
       return;
     }
 
-    // 1 kHz on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
+    // 1 kHz sine on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
     const amplitude = 0.125892541;
 
-    // If there was a previous toneContext, close it first
+    // If there was a previous toneContext, close it
     if (toneContext) {
       toneContext.close();
       toneContext = null;
