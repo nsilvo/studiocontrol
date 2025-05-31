@@ -9,20 +9,20 @@
  * - Manages one “studio” socket and multiple “remote” sockets in a room.
  */
 
-import fs from 'fs';
-import path from 'path';
-import http from 'http';
-import express from 'express';
-import { WebSocketServer } from 'ws';
-import winston from 'winston';
-import 'winston-daily-rotate-file';
-import { v4 as uuidv4 } from 'uuid';
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const express = require('express');
+const { WebSocketServer } = require('ws');
+const winston = require('winston');
+require('winston-daily-rotate-file');
+const { v4: uuidv4 } = require('uuid');
 
 /////////////////////////////////////////////////////
 // 1. CONFIGURATION
 /////////////////////////////////////////////////////
 
-const PORT = process.env.PORT || 3030;
+const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGIN = 'https://webrtc.brfm.net'; // only accept WS connections from this origin
 const LOG_DIR = path.join(__dirname, 'logs');
 
