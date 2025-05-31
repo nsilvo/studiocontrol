@@ -1,14 +1,9 @@
 /**
- * remote.js (v4)
+ * remote.js (v4.1)
  *
- * - WebRTC “remote contributor” logic:
- *   • Connects to signaling server as role="remote"
- *   • Exchanges SDP offer/answer and ICE candidates
- *   • Sends microphone audio (Opus 48kHz stereo)
- *   • Can mute/unmute self, switch to GLITS tone, listen to studio return audio
- *   • Displays local audio PPM meter
- *   • Receives bitrate-update from studio to adjust encoding bitrate
- *   • Auto‐reconnect on WS close
+ * Revised so that all `document.getElementById(...)` and `.onclick` bindings
+ * happen inside `window.addEventListener('load', ...)` to ensure the elements
+ * exist before we reference them.
  */
 
 (() => {
@@ -36,19 +31,17 @@
   let toneDestination = null;
   let toneTimer = null;
 
-  // UI elements
-  const statusSpan = document.getElementById('connStatus');
-  const muteBtn = document.getElementById('muteSelfBtn');
-  const toneBtn = document.getElementById('toneBtn');
-  const listenStudioBtn = document.getElementById('listenStudioBtn');
-  const meterCanvas = document.getElementById('meter-canvas');
-  const meterContext = meterCanvas.getContext('2d');
-  const chatWindowEl = document.getElementById('chatWindow');
-  const chatInputEl = document.getElementById('chatInput');
-  const sendChatBtn = document.getElementById('sendChatBtn');
-
-  // Hidden audio element for incoming studio audio
-  const audioStudioElem = document.getElementById('audio-studio');
+  // UI elements (populated after load)
+  let statusSpan;
+  let muteBtn;
+  let toneBtn;
+  let listenStudioBtn;
+  let meterCanvas;
+  let meterContext;
+  let chatWindowEl;
+  let chatInputEl;
+  let sendChatBtn;
+  let audioStudioElem;
 
   let audioContext = null;
   let analyserL = null;
@@ -173,7 +166,7 @@
     const track = localStream.getAudioTracks()[0];
     audioSender = pc.addTrack(track, localStream);
 
-    // Set initial bitrate to 64kbps by default
+    // Set initial bitrate to 64 kbps by default
     setAudioBitrate(64000);
 
     setupLocalMeter(localStream);
@@ -265,7 +258,9 @@
   // Local audio meter
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000,
+    });
     const source = audioContext.createMediaStreamSource(stream);
     const splitter = audioContext.createChannelSplitter(2);
 
@@ -334,7 +329,7 @@
     try {
       await audioSender.setParameters(params);
       console.log(`Audio bitrate set to ${bitrate} bps`);
-      statusSpan.textContent = `bitrate set to ${Math.round(bitrate/1000)} kbps`;
+      statusSpan.textContent = `bitrate set to ${Math.round(bitrate / 1000)} kbps`;
     } catch (err) {
       console.error('setParameters error:', err);
     }
@@ -382,7 +377,9 @@
     if (!audioSender) return;
 
     if (!isTone) {
-      toneContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      toneContext = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 48000,
+      });
       toneDestination = toneContext.createMediaStreamDestination();
 
       toneOscillator = toneContext.createOscillator();
@@ -454,13 +451,28 @@
   }
 
   /////////////////////////////////////////////////////
-  // EVENT LISTENERS
+  // DOCUMENT READY
   /////////////////////////////////////////////////////
   window.addEventListener('load', () => {
+    // Now that DOM is loaded, we can getElementById safely:
+    statusSpan = document.getElementById('connStatus');
+    muteBtn = document.getElementById('muteSelfBtn');
+    toneBtn = document.getElementById('toneBtn');
+    listenStudioBtn = document.getElementById('listenStudioBtn');
+    meterCanvas = document.getElementById('meter-canvas');
+    meterContext = meterCanvas.getContext('2d');
+    chatWindowEl = document.getElementById('chatWindow');
+    chatInputEl = document.getElementById('chatInput');
+    sendChatBtn = document.getElementById('sendChatBtn');
+    audioStudioElem = document.getElementById('audio-studio');
+
+    // Hook up event listeners now that elements exist:
+    muteBtn.onclick = toggleMute;
+    toneBtn.onclick = toggleTone;
+    listenStudioBtn.onclick = toggleListenStudio;
+    sendChatBtn.onclick = sendChat;
+
+    // Initialize WebSocket & signaling
     initWebSocket();
   });
-  muteBtn.onclick = toggleMute;
-  toneBtn.onclick = toggleTone;
-  listenStudioBtn.onclick = toggleListenStudio;
-  sendChatBtn.onclick = sendChat;
 })();
