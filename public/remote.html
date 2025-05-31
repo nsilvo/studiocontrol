@@ -2,49 +2,106 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Remote Contributor Interface</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Remote Contributor</title>
+  <!-- Link to your CSS file (if any) -->
   <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Minimal inline styling for layout; you can override/extend in style.css */
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+      color: #333;
+    }
+    h1 {
+      margin-bottom: 10px;
+    }
+    #controls {
+      margin-bottom: 15px;
+    }
+    #controls button {
+      margin-right: 10px;
+      padding: 8px 12px;
+      border: none;
+      background-color: #0066cc;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #controls button:hover {
+      background-color: #005bb5;
+    }
+    #meter-container {
+      margin-bottom: 15px;
+    }
+    #meter-canvas {
+      border: 1px solid #ccc;
+      background: #222;
+    }
+    #chat-container {
+      margin-top: 15px;
+    }
+    #chatWindow {
+      border: 1px solid #ccc;
+      background: #fff;
+      height: 150px;
+      overflow-y: auto;
+      padding: 5px;
+      margin-bottom: 5px;
+    }
+    #chatInput {
+      width: calc(100% - 100px);
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    #sendChatBtn {
+      padding: 8px 12px;
+      border: none;
+      background-color: #28a745;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-left: 5px;
+    }
+    #sendChatBtn:hover {
+      background-color: #218838;
+    }
+    #connStatus {
+      font-weight: bold;
+      color: #0066cc;
+    }
+  </style>
 </head>
 <body>
-  <header>
-    <h1>Remote Contributor</h1>
-  </header>
+  <h1>Remote Contributor</h1>
 
-  <div class="container" id="setup-section">
-    <div class="section">
-      <h2>Enter Your Name to Connect</h2>
-      <input type="text" id="nameInput" placeholder="Your Name" />
-      <button id="connectBtn">Connect</button>
-    </div>
+  <div>
+    Connection status: <span id="connStatus">not connected</span>
   </div>
 
-  <div class="container" id="remote-ui" style="display: none;">
-    <!-- Section: Controls -->
-    <div class="section" id="controls-section">
-      <h2>Controls</h2>
-      <button id="muteSelfBtn">Mute Myself</button>
-      <button id="toneBtn">Send Tone</button>
-      <span id="connStatus">Not connected</span>
-    </div>
-
-    <!-- Section: Audio Meter -->
-    <div class="section">
-      <h2>Your Audio Level</h2>
-      <canvas id="meter-canvas" class="meter-canvas" width="100" height="20"></canvas>
-    </div>
-
-    <!-- Section: Chat & Mute Status -->
-    <div class="section">
-      <h2>Chat & Mute Status</h2>
-      <div id="studioMuteStatus" style="font-weight: bold; margin-bottom: 10px;">
-        Studio is not speaking.
-      </div>
-      <div class="chat-window" id="chatWindow"></div>
-      <input type="text" id="chatInput" placeholder="Type message..." />
-      <button id="sendChatBtn">Send</button>
-    </div>
+  <div id="controls">
+    <button id="muteSelfBtn">Mute Myself</button>
+    <button id="toneBtn">Send GLITS Tone</button>
+    <button id="listenStudioBtn">Listen to Studio</button>
   </div>
 
+  <div id="meter-container">
+    <canvas id="meter-canvas" width="300" height="50"></canvas>
+  </div>
+
+  <div id="chat-container">
+    <div id="chatWindow"></div>
+    <input id="chatInput" type="text" placeholder="Type a message..." />
+    <button id="sendChatBtn">Send</button>
+  </div>
+
+  <!-- Hidden audio element for incoming studio audio -->
+  <audio id="audio-studio" autoplay style="display: none;"></audio>
+
+  <!-- Include the remote JavaScript -->
   <script src="remote.js"></script>
 </body>
 </html>
