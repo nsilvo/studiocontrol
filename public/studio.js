@@ -1,10 +1,10 @@
 /**
  * studio.js
  *
- * Front-end logic for the studio control interface (v7).
- * - Ensures remote → studio audio is attached properly.
- * - Maintains two-way audio (studio → remote) and mutual mute as before.
- * - ICE candidate queuing logic remains (silently ignoring unknown peers).
+ * Front-end logic for the studio control interface (v8).
+ * - Defers draining ICE candidates until after remote description is set.
+ * - In ontrack, ensures UI exists by creating it if necessary.
+ * - Maintains two-way audio, mutual mute, and handles ICE queuing.
  */
 
 (() => {
@@ -134,14 +134,13 @@
   }
 
   /////////////////////////////////////////////////////
-  // Add a remote to the UI (in waiting or connected)
+  // Add a remote to the UI (waiting or connected)
   /////////////////////////////////////////////////////
   function addRemoteToUI(remoteID, remoteName, state) {
     if (peers.has(remoteID)) return;
 
     const entry = { state, pendingCandidates: [] };
 
-    // Create waiting-list <li>
     const liWait = document.createElement('li');
     liWait.id = `waiting-${remoteID}`;
     liWait.className = 'contributor-item';
@@ -162,7 +161,6 @@
     entry.localMuted = false;
 
     if (state === 'waiting') {
-      // "Connect" button
       const connectBtn = document.createElement('button');
       connectBtn.textContent = 'Connect';
       connectBtn.onclick = () => {
@@ -182,13 +180,11 @@
       waitingListEl.appendChild(liWait);
       entry.liWaiting = liWait;
     } else if (state === 'connected') {
-      // (unlikely to get "connected" without going through "waiting")
       addConnectedUI(remoteID, remoteName);
       entry.liWaiting = null;
       entry.liConnected = document.getElementById(`connected-${remoteID}`);
     }
 
-    // Initialize other fields
     entry.pc = null;
     entry.audioElementRemoteToStudio = null;
     entry.audioElementStudioToRemote = null;
@@ -215,7 +211,6 @@
     } else if (newState === 'offered') {
       entry.statusSpan.textContent = 'offered';
     } else if (newState === 'connected') {
-      // Move from waiting → connected UI
       if (entry.liWaiting) {
         entry.liWaiting.remove();
         entry.liWaiting = null;
@@ -230,6 +225,9 @@
   function addConnectedUI(remoteID) {
     const entry = peers.get(remoteID);
     if (!entry) return;
+
+    // If UI already exists, skip
+    if (entry.liConnected) return;
 
     const remoteName = entry.liWaiting
       ? entry.liWaiting.querySelector('.name').textContent
@@ -258,7 +256,9 @@
     muteBtn.disabled = true;
     muteBtn.onclick = () => {
       entry.localMuted = !entry.localMuted;
-      entry.audioElementRemoteToStudio.muted = entry.localMuted;
+      if (entry.audioElementRemoteToStudio) {
+        entry.audioElementRemoteToStudio.muted = entry.localMuted;
+      }
       ws.send(
         JSON.stringify({
           type: 'mute-update',
@@ -397,15 +397,20 @@
         entry.statusSpan.textContent += ` [codec: ${codecInfo}]`;
       }
 
-      // Single ontrack handler for remote→studio and studio→remote
+      // Single ontrack handler
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
-        // If remote→studio audio not yet attached, do so
+        // If UI not created yet, create it now
+        if (!entry.audioElementRemoteToStudio) {
+          addConnectedUI(remoteID);
+        }
+        // Attach remote→studio audio if not yet attached
         if (!entry.audioElementRemoteToStudio.srcObject) {
           entry.audioElementRemoteToStudio.srcObject = incomingStream;
           setupMeter(remoteID, incomingStream);
-        } else if (
-          // Otherwise, it must be the studio→remote track echoed (unlikely but kept for completeness)
+        }
+        // (Optional) If studio→remote audio arrives back, attach to audioElementStudioToRemote
+        else if (
           !entry.audioElementStudioToRemote.srcObject &&
           evt.track.kind === 'audio'
         ) {
@@ -431,22 +436,26 @@
         const state = pc.connectionState;
         entry.statusSpan.textContent = state;
       };
-
-      // Drain any queued ICE candidates
-      entry.pendingCandidates.forEach((c) => {
-        pc.addIceCandidate(new RTCIceCandidate(c)).catch((e) => {
-          console.error('Error adding queued ICE candidate:', e);
-        });
-      });
-      entry.pendingCandidates = [];
     }
 
-    // Set remote (offer) description
+    // Set remote description (offer)
     try {
       await entry.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
     } catch (err) {
       console.error(`Failed to set remote description for ${remoteID}:`, err);
       return;
+    }
+
+    // Drain queued ICE candidates now that remote description is set
+    if (entry.pendingCandidates.length > 0) {
+      entry.pendingCandidates.forEach((c) => {
+        entry.pc
+          .addIceCandidate(new RTCIceCandidate(c))
+          .catch((e) => {
+            console.error('Error adding queued ICE candidate:', e);
+          });
+      });
+      entry.pendingCandidates = [];
     }
 
     // Create and send answer
@@ -478,8 +487,8 @@
       // Silently ignore if no peer exists at all
       return;
     }
-    if (!entry.pc) {
-      // Queue candidate for later if PC not created yet
+    // If PC not created or remote description not set, queue candidate
+    if (!entry.pc || !entry.pc.remoteDescription) {
       entry.pendingCandidates.push(candidate);
       return;
     }
