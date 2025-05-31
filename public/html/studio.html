@@ -5,6 +5,9 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Studio Interface</title>
+  <!-- Prevent /favicon.ico 404 -->
+  <link rel="icon" href="data:," />
+
   <link rel="stylesheet" href="css/studio.css" />
 </head>
 <body>
@@ -12,15 +15,30 @@
     <h1>WebRTC Studio Dashboard</h1>
   </header>
 
-  <main>
-    <div id="remotes-container">
-      <!-- Remote cards will be dynamically added here -->
-    </div>
-  </main>
+  <!-- 1. Panel to select which “studio” you are -->
+  <div id="studio-select-panel">
+    <label for="studio-select">Select Studio:</label>
+    <select id="studio-select">
+      <option value="Studio A">Studio A</option>
+      <option value="Studio B">Studio B</option>
+      <option value="Studio C">Studio C</option>
+      <!-- Add or remove options as needed -->
+    </select>
+    <button id="join-studio-btn">Join as Studio</button>
+  </div>
 
-  <!-- Include common utilities first -->
+  <!-- 2. The main dashboard (hidden until “Join as Studio” is clicked) -->
+  <div id="studio-dashboard" class="hidden">
+    <main>
+      <div id="remotes-container">
+        <!-- Remote cards will be dynamically added here once joined -->
+      </div>
+    </main>
+  </div>
+
+  <!-- Include shared utilities first -->
   <script src="js/common.js"></script>
-  <!-- Then the studio logic -->
+  <!-- Then the studio logic (wrapped in DOMContentLoaded) -->
   <script src="js/studio.js"></script>
 </body>
 </html>
