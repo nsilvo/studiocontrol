@@ -1,13 +1,10 @@
 /**
- * public/js/sports.js
+ * public/js/sports.js (No Compression)
  *
- * Extends the regular remote.js functionality with sports features:
- *  - Reporter name + Team A/B
- *  - Score display (TeamA : TeamB)
- *  - “Report Goal” button → increments local score, sends “goal” to studio
- *  - Flashing GOAL indicator until studio sends back “goal-ack”
- *  - Local recording of voice segments with download link
- *  - All standard remote functions: mute, GLITS tone, chat, WebRTC, keepalives, PPM meter
+ * - Captures raw mic (mono or stereo per mode) directly, merges with GLITS tone when active.
+ * - Stereo VU meter for outgoing audio.
+ * - Keeps GLITS tone generation, PPM meter, mode/bitrate switching, chat, keepalives, local recording.
+ * - Sports features: Reporter name, Team A/B, Score & “Report Goal” with flashing indicator until ack.
  */
 
 (() => {
@@ -25,11 +22,11 @@
   let ws = null;
   let pc = null;
   let micStream = null;          // Raw microphone MediaStream
-  let audioContext = null;       // Single AudioContext for mic + tone + compressor
+  let audioContext = null;       // AudioContext for mic + tone graph + VU meter
   let micGain = null;            // Gain for mic path
   let toneGain = null;           // Gain for tone path
-  let compressor = null;         // DynamicsCompressorNode
-  let processedStream = null;    // Output from compressor → RTCPeerConnection
+  let merger = null;             // ChannelMergerNode (2 inputs → stereo)
+  let processedStream = null;    // Merged stream (mic + tone) → RTCPeerConnection
   let audioSender = null;        // RTCRtpSender for outgoing audio
   let localID = null;
   let reporterName = '';
@@ -39,7 +36,7 @@
   let scoreB = 0;
   let goalPending = false;       // true until studio acknowledges
 
-  let currentMode = 'music';     // 'music' (stereo) or 'speech' (mono)
+  let currentMode = 'music';     // 'music' (stereo mic) or 'speech' (mono mic)
   let isMuted = false;
   let isTone = false;
 
@@ -272,7 +269,7 @@
       console.log('[sports] WS connected');
       statusSpan.textContent = 'Connected (WS)';
 
-      // Send join along with reporterName
+      // Send join along with reporterName so studio knows who and which page
       ws.send(
         JSON.stringify({
           type: 'join',
@@ -373,7 +370,7 @@
         break;
 
       default:
-        // Ignore keepalive and any other unknown type
+        // we ignore keepalive and other unrecognized types
         if (msg.type !== 'keepalive') {
           console.warn('[sports] Unknown signaling message:', msg.type);
         }
@@ -381,10 +378,10 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start WebRTC: capture mic, build compressor+tone, and connect
+  // Start WebRTC: capture raw mic, merge with tone, connect
   /////////////////////////////////////////////////////
   async function startWebRTC() {
-    // 1) capture mic with requested channel count
+    // Step 1: capture mic with requested channel count
     const channelCountMic = currentMode === 'speech' ? 1 : 2;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -399,14 +396,14 @@
       return;
     }
 
-    // 2) build a single AudioContext graph: micGain + toneGain → compressor → dest
+    // Step 2: build a single AudioContext graph: micGain + toneGain → merger → dest
     setupAudioGraph(channelCountMic);
 
-    // 3) create PeerConnection if not exists
+    // Step 3: create PeerConnection if not exists
     if (!pc) {
       pc = new RTCPeerConnection(ICE_CONFIG);
 
-      // ───▶ Route incoming studio audio into hidden <audio> for playback
+      // Receive studio audio
       pc.ontrack = (evt) => {
         const [incomingStream] = evt.streams;
         if (!audioStudioElem.srcObject) {
@@ -414,6 +411,7 @@
         }
       };
 
+      // Send ICE candidates to server
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
           ws.send(
@@ -433,26 +431,26 @@
         console.log('[sports] Connection state:', state);
       };
     } else {
-      // If PC already existed (mode-change), remove old sender
+      // If PC exists from a previous call (mode-change), remove old sender
       if (audioSender) {
         pc.removeTrack(audioSender);
         audioSender = null;
       }
     }
 
-    // 4) add compressor output track (mic or tone) for outbound audio
+    // Step 4: add the merged (raw mic+tone) track
     audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
 
-    // Enable GLITS‐tone button now that audioSender is ready
+    // Enable tone button now that audioSender is ready
     toneBtn.disabled = false;
 
-    // 5) set default bitrate (studio can override)
+    // Step 5: set default bitrate
     setAudioBitrate(64000);
 
-    // 6) start the local PPM meter on the compressed output
+    // Step 6: start the PPM meter for processedStream
     setupLocalMeter(processedStream);
 
-    // 7) create offer & send to studio
+    // Step 7: create offer → send to studio
     let offer;
     try {
       offer = await pc.createOffer();
@@ -472,10 +470,11 @@
   }
 
   /////////////////////////////////////////////////////
-  // Build AudioContext graph: mic → micGain → compressor → dest
-  //                               tone → toneGain ↗
+  // Build AudioContext graph WITHOUT compression
+  // micGain + toneGain → merger → MediaStreamDestination
   /////////////////////////////////////////////////////
   function setupAudioGraph(channelCountMic) {
+    // Close any previous AudioContext
     if (audioContext) {
       audioContext.close();
       audioContext = null;
@@ -490,9 +489,9 @@
     // 1) Mic source
     const micSource = audioContext.createMediaStreamSource(micStream);
 
-    // 2) Create two Gain nodes: one for mic, one for tone
+    // 2) Create Gain nodes: one for mic, one for tone
     micGain = audioContext.createGain();
-    micGain.gain.value = 1; // mic initially on
+    micGain.gain.value = 1; // mic on
 
     toneGain = audioContext.createGain();
     toneGain.gain.value = 0; // tone off initially
@@ -500,27 +499,16 @@
     // 3) Connect mic → micGain
     micSource.connect(micGain);
 
-    // 4) Create compressor
-    compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.setValueAtTime(-14, audioContext.currentTime);
-    compressor.knee.setValueAtTime(0, audioContext.currentTime);
-    compressor.ratio.setValueAtTime(12, audioContext.currentTime);
-    compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
-    compressor.release.setValueAtTime(0.25, audioContext.currentTime);
-
-    // 5) Create merger (2 inputs → stereo)
-    const merger = audioContext.createChannelMerger(2);
+    // 4) Create merger of 2 inputs (stereo)
+    merger = audioContext.createChannelMerger(2);
     micGain.connect(merger, 0, 0);
     toneGain.connect(merger, 0, 1);
 
-    // 6) merger → compressor
-    merger.connect(compressor);
-
-    // 7) compressor → destination
+    // 5) Merger → destination
     const destNode = audioContext.createMediaStreamDestination();
-    compressor.connect(destNode);
+    merger.connect(destNode);
 
-    // 8) processedStream
+    // 6) processedStream is now raw mic+tone
     processedStream = destNode.stream;
   }
 
@@ -551,6 +539,7 @@
 
   /////////////////////////////////////////////////////
   // Apply a new mode: 'speech' (mono) or 'music' (stereo)
+  // Simply re-capture mic and reconnect micGain → merger
   /////////////////////////////////////////////////////
   async function applyMode(newMode) {
     if (newMode !== 'speech' && newMode !== 'music') return;
@@ -589,7 +578,7 @@
       toneGain.gain.setValueAtTime(0, audioContext.currentTime);
     }
 
-    // Replace track and renegotiate
+    // Replace outgoing track and renegotiate
     const newTrack = processedStream.getAudioTracks()[0];
     if (audioSender) {
       audioSender.replaceTrack(newTrack);
@@ -611,7 +600,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Local audio PPM meter (processedStream)
+  // Local audio PPM (stereo) meter on processedStream
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
     const meterContextAudio = new (window.AudioContext || window.webkitAudioContext)({
@@ -763,7 +752,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start GLITS Tone through the same compressor graph
+  // Start GLITS Tone through the raw merger graph
   /////////////////////////////////////////////////////
   function startGlitsTone() {
     if (!audioContext || !toneGain) {
@@ -771,7 +760,7 @@
       return;
     }
 
-    // 1 kHz sine on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
+    // 1 kHz sine on each channel at –18 dBFS → gain ≈ 0.125892541
     const amplitude = 0.125892541;
 
     // If there's already an oscillator, stop it
@@ -808,6 +797,7 @@
     setGlitsSchedule();
     glitsInterval = setInterval(setGlitsSchedule, 4000);
 
+    // Mute microphone path when tone is active
     micGain.gain.setValueAtTime(0, audioContext.currentTime);
   }
 
@@ -842,11 +832,11 @@
     const base = audioContext.currentTime;
     const amp = 0.125892541;
 
-    // LEFT: silent [t → t+0.25], then on [t+0.25 → end]
+    // LEFT channel pattern: silent [t → t+0.25], then on [t+0.25 → end]
     toneGain.gain.setValueAtTime(0, base);
     toneGain.gain.setValueAtTime(amp, base + 0.25);
 
-    // TWO‐CHANNEL pattern on single gain node (approximate)
+    // RIGHT channel pattern approximated on same gain node:
     toneGain.gain.setValueAtTime(amp, base);                 // t → t+0.25
     toneGain.gain.setValueAtTime(0, base + 0.25);            // t+0.25 → t+0.50
     toneGain.gain.setValueAtTime(amp, base + 0.5);           // t+0.50 → t+0.75
@@ -871,7 +861,7 @@
 
   /////////////////////////////////////////////////////
   // Send chat
-  //////////////////////////////////////////////////###
+  /////////////////////////////////////////////////////
   function sendChat() {
     const text = chatInputEl.value.trim();
     if (!text) return;
