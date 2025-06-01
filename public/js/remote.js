@@ -1,22 +1,22 @@
 /**
- * public/js/remote.js
+ * public/js/remote.js (No Compression)
  *
  * - Two‐step remote flow:
  *    1. Prompt for name.
- *    2. Once name is submitted, initialize UI, mic, and WebSocket/RTC.
+ *    2. Once name is submitted, reveal main UI, show displayName, set up a
+ *       raw stereo/mono mic capture with optional GLITS tone, start WebSocket/RTC.
  *
- * - All outgoing audio (mic or GLITS tone) is passed through a
- *   single AudioContext → Gain nodes → DynamicsCompressorNode
- *   → MediaStreamDestination → sent via RTCPeerConnection.
+ * - Listens for studio “mode‐update” messages to switch between:
+ *     • speech → mono (1 channel)
+ *     • music  → stereo (2 channels)
+ *   Automatically re‐negotiates the connection when mode changes.
  *
- * - Studio “mode‐update” (speech vs. music) changes channel count
- *   only on the mic capture. Tone is always stereo.
+ * - Listens for studio “bitrate-update” messages to adjust encoder bitrate.
  *
- * - Studio “bitrate‐update” adjusts encoder bitrate.
+ * - All outgoing audio is raw (no compressor). GLITS tone can be toggled.
  *
- * - PPM meter displays two bars (left + right).
- *
- * - WebSocket keepalives every 30s to avoid idle‐timeout drops.
+ * - PPM meter always displays two bars (left + right). If only 1 channel is active,
+ *   it displays the same data on both bars (mono display).
  */
 
 (() => {
@@ -33,63 +33,32 @@
 
   let ws = null;
   let pc = null;
-  let micStream = null;          // Raw microphone MediaStream
-  let audioContext = null;       // Single AudioContext for mic + tone + compressor
-  let micGain = null;            // Gain for mic path
-  let toneGain = null;           // Gain for tone path
-  let compressor = null;         // DynamicsCompressorNode
-  let processedStream = null;    // Output from compressor → RTCPeerConnection
-  let audioSender = null;        // RTCRtpSender for outgoing audio
+  let micStream = null;       // Raw mic MediaStream
+  let audioContext = null;    // AudioContext for mic + tone + meter
+  let micGain = null;         // Gain node for mic
+  let toneGain = null;        // Gain node for GLITS tone
+  let merger = null;          // ChannelMergerNode (2 inputs → stereo)
+  let processedStream = null; // MediaStream from merger
+  let audioSender = null;     // RTCRtpSender for outgoing audio
   let localID = null;
   let displayName = '';
-  let currentMode = 'music';     // 'music' (stereo) or 'speech' (mono)
+  let currentMode = 'music';  // 'music' (stereo) or 'speech' (mono)
   let isMuted = false;
   let isTone = false;
 
-  // GLITS‐tone oscillator nodes (always stereo)
+  // GLITS‐tone nodes
   let leftOsc = null;
   let rightOsc = null;
   let glitsInterval = null;
 
   // DOM elements
-  let nameInput;
-  let nameSubmitBtn;
-  let nameStepDiv;
-  let mainUiDiv;
-  let displayNameDiv;
+  let nameInput, nameSubmitBtn, nameStepDiv, mainUiDiv, displayNameDiv;
+  let statusSpan, muteBtn, toneBtn, listenStudioBtn, meterCanvas, meterContext;
+  let chatWindowEl, chatInputEl, sendChatBtn, audioStudioElem;
 
-  let statusSpan;
-  let muteBtn;
-  let toneBtn;
-  let listenStudioBtn;
-  let meterCanvas;
-  let meterContext;
-  let chatWindowEl;
-  let chatInputEl;
-  let sendChatBtn;
-  let audioStudioElem;
-
+  // PPM analyser
   let analyserL = null;
   let analyserR = null;
-
-  // ────────────────────────────────────────────────────────────────────────
-  // KEEPALIVE LOGIC
-  let keepaliveIntervalId = null;
-  function startKeepalive() {
-    if (keepaliveIntervalId) return;
-    keepaliveIntervalId = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'keepalive' }));
-      }
-    }, 30000);
-  }
-  function stopKeepalive() {
-    if (keepaliveIntervalId) {
-      clearInterval(keepaliveIntervalId);
-      keepaliveIntervalId = null;
-    }
-  }
-  // ────────────────────────────────────────────────────────────────────────
 
   /////////////////////////////////////////////////////
   // Step 1: Prompt for name
@@ -104,7 +73,7 @@
     nameSubmitBtn.onclick = () => {
       const typedName = nameInput.value.trim();
       if (!typedName) {
-        alert('Please enter your name.');
+        alert('Please enter your name before continuing.');
         return;
       }
       displayName = typedName;
@@ -136,12 +105,9 @@
     audioStudioElem = document.getElementById('audio-studio');
 
     muteBtn.onclick = toggleMute;
+    toneBtn.onclick = toggleTone;
     listenStudioBtn.onclick = toggleListenStudio;
     sendChatBtn.onclick = sendChat;
-
-    // Disable tone button until audioSender is ready
-    toneBtn.disabled = true;
-    toneBtn.onclick = toggleTone;
   }
 
   /////////////////////////////////////////////////////
@@ -150,8 +116,8 @@
   function initWebSocket() {
     ws = new WebSocket(`wss://${window.location.host}`);
     ws.onopen = () => {
-      console.log('[remote] WS connected');
-      statusSpan.textContent = 'Connected (WS)';
+      console.log('[remote] WS opened');
+      statusSpan.textContent = 'connected (WS)';
       // Send join with displayName
       ws.send(
         JSON.stringify({
@@ -160,10 +126,7 @@
           name: displayName,
         })
       );
-      // Start sending keepalives every 30 seconds
-      startKeepalive();
     };
-
     ws.onmessage = (evt) => {
       let msg;
       try {
@@ -174,26 +137,15 @@
       }
       handleSignalingMessage(msg);
     };
-
     ws.onclose = () => {
       console.warn('[remote] WS closed. Reconnecting in 5 seconds...');
-      statusSpan.textContent = 'Disconnected (WS)';
-      // Stop keepalives
-      stopKeepalive();
+      statusSpan.textContent = 'disconnected (WS)';
       setTimeout(initWebSocket, 5000);
       if (pc) {
         pc.close();
         pc = null;
       }
-      // Reset tone state
-      if (isTone) {
-        stopGlitsTone();
-        isTone = false;
-        toneBtn.textContent = 'Send GLITS Tone';
-        toneBtn.disabled = true;
-      }
     };
-
     ws.onerror = (err) => {
       console.error('[remote] WS error:', err);
       ws.close();
@@ -205,39 +157,31 @@
   /////////////////////////////////////////////////////
   async function handleSignalingMessage(msg) {
     switch (msg.type) {
-      case 'joined':
-        // Server confirmed our join and gave us an ID.
-        // { type: "joined", id: "<uuid>" }
-        localID = msg.id;
-        console.log('[remote] Joined as ID:', localID);
-        statusSpan.textContent = 'Waiting for studio';
-        break;
-
       case 'id-assigned':
-        // { type: 'id-assigned', id }
+        // { type:'id-assigned', id }
         localID = msg.id;
         console.log('[remote] Assigned localID:', localID);
-        statusSpan.textContent = 'Waiting for studio';
+        statusSpan.textContent = 'waiting for studio';
         break;
 
       case 'start-call':
-        // { type: 'start-call' }
-        statusSpan.textContent = 'Connecting (WebRTC)...';
+        // Studio asks us to start WebRTC
+        statusSpan.textContent = 'connecting (WebRTC)...';
         await startWebRTC();
         break;
 
       case 'answer':
-        // { type: 'answer', sdp }
+        // { type:'answer', from:'studio', sdp }
         await handleAnswer(msg.sdp);
         break;
 
       case 'candidate':
-        // { type: 'candidate', candidate }
+        // { type:'candidate', from:'studio', candidate }
         await handleCandidate(msg.candidate);
         break;
 
       case 'mode-update':
-        // { type:'mode-update', mode:'speech'|'music' }
+        // { type:'mode-update', mode: 'speech'|'music' }
         console.log('[remote] Received mode-update:', msg.mode);
         await applyMode(msg.mode);
         break;
@@ -250,18 +194,12 @@
 
       case 'studio-disconnected':
         console.warn('[remote] Studio disconnected.');
-        statusSpan.textContent = 'Studio disconnected';
+        statusSpan.textContent = 'studio disconnected';
         break;
 
       case 'chat':
-        // { type:'chat', from:'Studio', text }
-        appendChatMessage(msg.from, msg.text, false);
-        break;
-
-      case 'mute-update':
-        // { type:'mute-update', muted:true/false }
-        console.log('[remote] Mute update:', msg.muted);
-        applyRemoteMute(msg.muted);
+        // { type:'chat', from:'studio', name:'Studio', message }
+        appendChatMessage(msg.name, msg.message, false);
         break;
 
       default:
@@ -270,11 +208,12 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start WebRTC: capture mic, set up compressor+tone, and connect
+  // Start WebRTC: capture raw mic, build merger+tone graph, and connect
   /////////////////////////////////////////////////////
   async function startWebRTC() {
-    // Step 1: capture mic with requested channel count
+    // Step 1: capture mic with requested channel count based on currentMode
     const channelCountMic = currentMode === 'speech' ? 1 : 2;
+
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -284,11 +223,11 @@
       });
     } catch (err) {
       console.error('[remote] getUserMedia error:', err);
-      statusSpan.textContent = 'Mic error';
+      statusSpan.textContent = 'mic error';
       return;
     }
 
-    // Step 2: build a single AudioContext graph: micGain + toneGain → compressor → dest
+    // Step 2: build a single AudioContext graph: micGain + toneGain → merger → dest
     setupAudioGraph(channelCountMic);
 
     // Step 3: create PeerConnection if not exists
@@ -317,30 +256,27 @@
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
-        statusSpan.textContent = `Connected (WebRTC: ${state})`;
+        statusSpan.textContent = `connected (WebRTC: ${state})`;
         console.log('[remote] Connection state:', state);
       };
     } else {
-      // If PC existed (mode-change), remove old sender
+      // If PC exists from a previous call (mode-change), remove old sender
       if (audioSender) {
         pc.removeTrack(audioSender);
         audioSender = null;
       }
     }
 
-    // Step 4: add compressor output track
+    // Step 4: add the merged (mic+tone) audio track
     audioSender = pc.addTrack(processedStream.getAudioTracks()[0], processedStream);
 
-    // Enable tone button now that audioSender is ready
-    toneBtn.disabled = false;
-
-    // Step 5: set default bitrate (studio can override)
+    // Step 5: set a default bitrate (studio can override)
     setAudioBitrate(64000);
 
-    // Step 6: start the PPM meter for processedStream
+    // Step 6: start the stereo PPM meter for processedStream
     setupLocalMeter(processedStream);
 
-    // Step 7: create offer & send to studio
+    // Step 7: create offer → send to studio
     let offer;
     try {
       offer = await pc.createOffer();
@@ -360,11 +296,11 @@
   }
 
   /////////////////////////////////////////////////////
-  // Build AudioContext graph: mic → micGain → compressor → dest
-  //                               tone → toneGain ↗
+  // Build AudioContext graph WITHOUT compression:
+  // micGain + toneGain → merger → MediaStreamDestination
   /////////////////////////////////////////////////////
   function setupAudioGraph(channelCountMic) {
-    // If there’s an existing context, shut it down first
+    // If there's an existing audioContext, close it
     if (audioContext) {
       audioContext.close();
       audioContext = null;
@@ -372,45 +308,34 @@
       analyserR = null;
     }
 
+    // 1) New AudioContext
     audioContext = new (window.AudioContext || window.webkitAudioContext)({
       sampleRate: 48000,
     });
 
-    // 1) Mic source
-    const micSource = audioContext.createMediaStreamSource(micStream);
+    // 2) Create mic source
+    const srcNode = audioContext.createMediaStreamSource(micStream);
 
-    // 2) Create two Gain nodes: one for mic, one for tone
+    // 3) Create Gain nodes
     micGain = audioContext.createGain();
-    micGain.gain.value = 1; // initially mic on
+    micGain.gain.value = 1; // mic on
 
     toneGain = audioContext.createGain();
     toneGain.gain.value = 0; // tone off initially
 
-    // 3) Connect mic → micGain
-    micSource.connect(micGain);
+    // 4) Connect mic → micGain
+    srcNode.connect(micGain);
 
-    // 4) Create compressor
-    compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.setValueAtTime(-14, audioContext.currentTime);
-    compressor.knee.setValueAtTime(0, audioContext.currentTime);
-    compressor.ratio.setValueAtTime(12, audioContext.currentTime);
-    compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
-    compressor.release.setValueAtTime(0.25, audioContext.currentTime);
-
-    // 5) Create merger (if mic is stereo or mono, handle accordingly)
-    //    For simplicity, use ChannelMerger of 2 inputs:
-    const merger = audioContext.createChannelMerger(2);
+    // 5) Create merger (2-input → stereo)
+    merger = audioContext.createChannelMerger(2);
     micGain.connect(merger, 0, 0);
     toneGain.connect(merger, 0, 1);
 
-    // 6) Connect merger → compressor
-    merger.connect(compressor);
-
-    // 7) Create a MediaStreamDestination
+    // 6) Merger → destination
     const destNode = audioContext.createMediaStreamDestination();
-    compressor.connect(destNode);
+    merger.connect(destNode);
 
-    // 8) Set processedStream to include that single track
+    // 7) processedStream from destNode
     processedStream = destNode.stream;
   }
 
@@ -441,21 +366,21 @@
 
   /////////////////////////////////////////////////////
   // Apply a new mode: 'speech' (mono) or 'music' (stereo)
-  // Renegotiate channelCount for mic; tone path remains stereo.
+  // Re‐capture, reconnect micGain→merger, and renegotiate.
   /////////////////////////////////////////////////////
   async function applyMode(newMode) {
     if (newMode !== 'speech' && newMode !== 'music') return;
     if (currentMode === newMode) return;
     currentMode = newMode;
-    if (!pc) return; // PC not started yet; startWebRTC will use updated currentMode
+    if (!pc) return; // If WebRTC not started yet, startWebRTC will use updated currentMode
 
-    // 1) Stop existing mic stream
+    // 1) Stop existing mic tracks
     if (micStream) {
       micStream.getTracks().forEach((t) => t.stop());
       micStream = null;
     }
 
-    // 2) Request new mic capture with updated channelCount
+    // 2) Request new mic capture
     const channelCountMic = currentMode === 'speech' ? 1 : 2;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -469,18 +394,18 @@
       return;
     }
 
-    // 3) Rebuild audio graph: connect new micSource → micGain → merger → compressor
+    // 3) Reconnect new mic to micGain
     const micSource = audioContext.createMediaStreamSource(micStream);
     micGain.disconnect();
     micSource.connect(micGain);
 
-    // 4) If currently sending tone, leave toneGain alone; otherwise ensure micGain=1, toneGain=0
+    // If tone not active, ensure micGain=1, toneGain=0
     if (!isTone) {
-      micGain.gain.value = 1;
-      toneGain.gain.value = 0;
+      micGain.gain.setValueAtTime(1, audioContext.currentTime);
+      toneGain.gain.setValueAtTime(0, audioContext.currentTime);
     }
 
-    // 5) Renegotiate: replace the track on the same audioSender and send a new offer
+    // 4) Replace outgoing track and renegotiate
     const newTrack = processedStream.getAudioTracks()[0];
     if (audioSender) {
       audioSender.replaceTrack(newTrack);
@@ -502,7 +427,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Local audio PPM meter (always stereo output from processedStream)
+  // Create a stereo PPM meter on processedStream
   /////////////////////////////////////////////////////
   function setupLocalMeter(stream) {
     // Create a NEW AudioContext solely for metering
@@ -579,7 +504,7 @@
     try {
       await audioSender.setParameters(params);
       console.log(`[remote] Audio bitrate set to ${bitrate} bps`);
-      statusSpan.textContent = `Bitrate: ${Math.round(bitrate / 1000)} kbps`;
+      statusSpan.textContent = `bitrate set to ${Math.round(bitrate / 1000)} kbps`;
     } catch (err) {
       console.error('[remote] setParameters error:', err);
     }
@@ -591,7 +516,6 @@
   function toggleMute() {
     if (!audioSender) return;
     isMuted = !isMuted;
-    // Mute means replacing track with null
     const track = isMuted ? null : processedStream.getAudioTracks()[0];
     audioSender.replaceTrack(track);
 
@@ -605,18 +529,6 @@
     );
 
     muteBtn.textContent = isMuted ? 'Unmute Myself' : 'Mute Myself';
-  }
-
-  /////////////////////////////////////////////////////
-  // Apply remote‐imposed mute (studio → remote)
-  /////////////////////////////////////////////////////
-  function applyRemoteMute(muted) {
-    isMuted = muted;
-    if (audioSender) {
-      const track = isMuted ? null : processedStream.getAudioTracks()[0];
-      audioSender.replaceTrack(track);
-      console.log('[remote] Applied studio mute:', muted);
-    }
   }
 
   /////////////////////////////////////////////////////
@@ -656,7 +568,7 @@
   }
 
   /////////////////////////////////////////////////////
-  // Start GLITS Tone through the same compressor graph
+  // Start GLITS Tone through the raw merger graph
   /////////////////////////////////////////////////////
   function startGlitsTone() {
     if (!audioContext || !toneGain) {
@@ -664,10 +576,10 @@
       return;
     }
 
-    // 1 kHz sine on each channel at –18 dBFS → gain = 10^(–18/20) ≈ 0.125892541
+    // 1 kHz sine on each channel at –18 dBFS → gain = 0.125892541
     const amplitude = 0.125892541;
 
-    // If there's already an oscillator running, stop it first
+    // If there was a previous toneContext, stop it
     if (leftOsc) {
       leftOsc.stop();
       leftOsc.disconnect();
@@ -683,7 +595,6 @@
       glitsInterval = null;
     }
 
-    // Create oscillators for left & right channels
     leftOsc = audioContext.createOscillator();
     rightOsc = audioContext.createOscillator();
     leftOsc.type = 'sine';
@@ -691,22 +602,18 @@
     leftOsc.frequency.setValueAtTime(1000, audioContext.currentTime);
     rightOsc.frequency.setValueAtTime(1000, audioContext.currentTime);
 
-    // Connect oscillators to toneGain
     leftOsc.connect(toneGain);
     rightOsc.connect(toneGain);
 
-    // Initialize toneGain to silent; we'll schedule amplitude changes
     toneGain.gain.setValueAtTime(0, audioContext.currentTime);
 
-    // Start oscillators
     leftOsc.start();
     rightOsc.start();
 
-    // Schedule the GLITS pattern every 4s
     setGlitsSchedule();
     glitsInterval = setInterval(setGlitsSchedule, 4000);
 
-    // Mute the mic path
+    // Mute microphone path when tone is active
     micGain.gain.setValueAtTime(0, audioContext.currentTime);
   }
 
@@ -729,7 +636,6 @@
       rightOsc = null;
     }
 
-    // Restore mic path
     micGain.gain.setValueAtTime(1, audioContext.currentTime);
     toneGain.gain.setValueAtTime(0, audioContext.currentTime);
   }
@@ -746,14 +652,7 @@
     toneGain.gain.setValueAtTime(0, base);
     toneGain.gain.setValueAtTime(amp, base + 0.25);
 
-    // RIGHT channel pattern on toneGain directly (since both oscillators feed toneGain)
-    // We simulate turning the right channel off by setting gain to zero at specific times,
-    // then back on. But since toneGain is shared, we approximate by setting amplitude modulations:
-    //  On [t → t+0.25], toneGain = amp  (both channels audible; left and right are same freq)
-    //  At [t+0.25], mute toneGain for 0.25s → effectively both channels silent (approx)
-    //  At [t+0.50], toneGain = amp → both channels audible for 0.25s
-    //  At [t+0.75], toneGain = 0 → silent for 0.25s
-    //  At [t+1.0], toneGain = amp → remain on until next cycle
+    // RIGHT channel pattern (approximated)
     toneGain.gain.setValueAtTime(amp, base);                 // t → t+0.25
     toneGain.gain.setValueAtTime(0, base + 0.25);            // t+0.25 → t+0.50
     toneGain.gain.setValueAtTime(amp, base + 0.5);           // t+0.50 → t+0.75
@@ -778,7 +677,7 @@
 
   /////////////////////////////////////////////////////
   // Send chat
-  //////////////////////////////////////////////////###
+  /////////////////////////////////////////////////////
   function sendChat() {
     const text = chatInputEl.value.trim();
     if (!text) return;
@@ -787,7 +686,7 @@
         type: 'chat',
         from: localID,
         name: displayName,
-        text: text,
+        message: text,
         target: 'studio',
       })
     );
